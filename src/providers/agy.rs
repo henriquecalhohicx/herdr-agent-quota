@@ -4,14 +4,71 @@ use crate::providers::statusline::{parse_context, parse_model};
 use crate::providers::ProviderError;
 use serde_json::Value;
 
+/// Fallback key lists used when the active pool cannot be determined.
 const FIVE_HOUR_KEYS: [&str; 2] = ["gemini-5h", "3p-5h"];
 const WEEKLY_KEYS: [&str; 2] = ["gemini-weekly", "3p-weekly"];
 
+const GEMINI_FIVE_HOUR_KEYS: [&str; 1] = ["gemini-5h"];
+const GEMINI_WEEKLY_KEYS: [&str; 1] = ["gemini-weekly"];
+const THIRD_PARTY_FIVE_HOUR_KEYS: [&str; 1] = ["3p-5h"];
+const THIRD_PARTY_WEEKLY_KEYS: [&str; 1] = ["3p-weekly"];
+
+/// The quota pool that the active model draws from.
+#[derive(Debug, Clone, Copy)]
+enum Pool {
+    Gemini,
+    ThirdParty,
+}
+
+impl Pool {
+    fn five_hour_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Gemini => &GEMINI_FIVE_HOUR_KEYS,
+            Self::ThirdParty => &THIRD_PARTY_FIVE_HOUR_KEYS,
+        }
+    }
+
+    fn weekly_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Gemini => &GEMINI_WEEKLY_KEYS,
+            Self::ThirdParty => &THIRD_PARTY_WEEKLY_KEYS,
+        }
+    }
+}
+
+/// Detect which quota pool the active model draws from.
+///
+/// Gemini-family model names contain `gemini`, `flash`, or `learnlm`.
+/// Third-party model names include Claude variants (`claude`, `sonnet`,
+/// `haiku`, `opus`), GPT models, and OpenAI reasoning series (`o1`, `o3`,
+/// `o4`). Returns `None` for unrecognised names so the caller falls back to
+/// the conservative minimum across both pools.
+fn active_pool(model: Option<&str>) -> Option<Pool> {
+    let lower = model?.to_ascii_lowercase();
+    if lower.contains("gemini") || lower.contains("flash") || lower.contains("learnlm") {
+        Some(Pool::Gemini)
+    } else if lower.contains("claude")
+        || lower.contains("sonnet")
+        || lower.contains("haiku")
+        || lower.contains("opus")
+        || lower.contains("gpt")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        Some(Pool::ThirdParty)
+    } else {
+        None
+    }
+}
+
 /// Parse the quota object emitted by Agy/Antigravity's statusLine JSON.
 ///
-/// Agy reports separate Gemini and third-party (Claude/GPT) pools. The
-/// sidebar has one Agy row, so each window is represented conservatively by
-/// the lowest remaining percentage across the pools that are present.
+/// Agy reports separate Gemini and third-party (Claude/GPT) pools. When the
+/// active model can be identified, only its pool's quota is shown so the
+/// sidebar reflects the limit that actually applies to the current session.
+/// For unrecognised model names the sidebar falls back to the conservative
+/// minimum across both pools.
 pub fn parse_statusline(
     value: &Value,
     fetched_at_unix: u64,
@@ -20,10 +77,14 @@ pub fn parse_statusline(
         .get("quota")
         .and_then(Value::as_object)
         .ok_or_else(|| ProviderError::UnsupportedResponse("missing quota".to_string()))?;
+    let model = parse_model(value);
+    let pool = active_pool(model.as_deref());
+    let five_hour_keys: &[&str] = pool.map_or(&FIVE_HOUR_KEYS, Pool::five_hour_keys);
+    let weekly_keys: &[&str] = pool.map_or(&WEEKLY_KEYS, Pool::weekly_keys);
     let mut windows = Vec::new();
     for (kind, keys) in [
-        (WindowKind::FiveHour, &FIVE_HOUR_KEYS[..]),
-        (WindowKind::Weekly, &WEEKLY_KEYS[..]),
+        (WindowKind::FiveHour, five_hour_keys),
+        (WindowKind::Weekly, weekly_keys),
     ] {
         if let Some(window) = parse_window(quota, kind, keys, fetched_at_unix)? {
             windows.push(window);
@@ -36,7 +97,7 @@ pub fn parse_statusline(
     }
     Ok(
         ProviderSnapshot::new(Provider::Agy, windows, fetched_at_unix)
-            .with_model(parse_model(value))
+            .with_model(model)
             .with_context(
                 parse_context(
                     value
@@ -210,5 +271,69 @@ mod tests {
     #[test]
     fn rejects_payload_without_quota_windows() {
         assert!(parse_statusline(&json!({"quota": {}}), 1).is_err());
+    }
+
+    #[test]
+    fn routes_claude_model_to_third_party_pool() {
+        // gemini-5h is exhausted (0 %), but the active model is Claude so the
+        // sidebar should show the 3p-5h value (52 %) not the minimum (0 %).
+        let value = json!({
+            "model": {"display_name": "Claude Sonnet 4.5"},
+            "quota": {
+                "gemini-5h": {"remaining_fraction": 0.0, "reset_in_seconds": 1000},
+                "gemini-weekly": {"remaining_fraction": 0.8, "reset_in_seconds": 7200},
+                "3p-5h": {"remaining_fraction": 0.52, "reset_in_seconds": 5000},
+                "3p-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 90000}
+            }
+        });
+        let snapshot = parse_statusline(&value, 0).unwrap();
+        // 3p-5h reset_in_seconds=5000 from base 0 → resets_at 5000
+        assert_eq!(
+            snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
+            Some(ResetAt::from_unix_seconds(5000))
+        );
+        // remaining_percent should reflect 3p-5h (52 %), not min (0 %)
+        assert!(snapshot.window(WindowKind::FiveHour).unwrap().remaining_percent > 50.0);
+    }
+
+    #[test]
+    fn routes_gemini_model_to_gemini_pool() {
+        // 3p-5h is low (10 %), but the active model is Gemini so the sidebar
+        // should show the gemini-5h value (75 %) not the minimum (10 %).
+        let value = json!({
+            "model": {"display_name": "Gemini Flash"},
+            "quota": {
+                "gemini-5h": {"remaining_fraction": 0.75, "reset_in_seconds": 1000},
+                "gemini-weekly": {"remaining_fraction": 0.9, "reset_in_seconds": 7200},
+                "3p-5h": {"remaining_fraction": 0.1, "reset_in_seconds": 5000},
+                "3p-weekly": {"remaining_fraction": 0.2, "reset_in_seconds": 90000}
+            }
+        });
+        let snapshot = parse_statusline(&value, 0).unwrap();
+        // gemini-5h reset_in_seconds=1000 from base 0 → resets_at 1000
+        assert_eq!(
+            snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
+            Some(ResetAt::from_unix_seconds(1000))
+        );
+        assert!(snapshot.window(WindowKind::FiveHour).unwrap().remaining_percent > 70.0);
+    }
+
+    #[test]
+    fn falls_back_to_conservative_min_for_unknown_model() {
+        // Unrecognised model → min(gemini-5h=90 %, 3p-5h=30 %) = 30 % with
+        // the 3p-5h reset timestamp.
+        let value = json!({
+            "model": {"display_name": "Future Model XYZ"},
+            "quota": {
+                "gemini-5h": {"remaining_fraction": 0.9, "reset_in_seconds": 1000},
+                "3p-5h": {"remaining_fraction": 0.3, "reset_in_seconds": 5000}
+            }
+        });
+        let snapshot = parse_statusline(&value, 0).unwrap();
+        assert_eq!(
+            snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
+            Some(ResetAt::from_unix_seconds(5000))
+        );
+        assert!(snapshot.window(WindowKind::FiveHour).unwrap().remaining_percent < 35.0);
     }
 }

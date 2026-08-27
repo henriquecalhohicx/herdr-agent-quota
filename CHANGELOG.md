@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Agy/Antigravity quota now shows the pool that the active model actually
+  draws from instead of the conservative minimum across both pools. Gemini-family
+  model names (`gemini`, `flash`, `learnlm`) select the `gemini-*` pool;
+  Claude, Sonnet, Haiku, Opus, GPT, and OpenAI o-series models select the
+  `3p-*` pool. Unrecognised model names fall back to the previous behaviour
+  (minimum across both pools) so the sidebar remains correct after a provider
+  adds a new model name without a plugin update.
+
 ### Added
 
 - Provider rows now use one compact `$quota_provider_model` identity token

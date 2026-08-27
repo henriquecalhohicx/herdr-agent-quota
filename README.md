@@ -364,9 +364,10 @@ such as `Thinking` or `Executing`. It does not show the working directory.
   does not expose an exact expiry timestamp.
 - **Agy/Antigravity:** the official [`/usage` and statusline docs](https://antigravity.google/docs/cli/commands/usage?app=antigravity-ide)
   supply Gemini and third-party pools plus context-used percentage and cache
-  counters. When both pools exist, the sidebar uses the lowest remaining
-  percentage so the single Agy row is conservative. Agy has no reliable TTL
-  field; its cache rows appear only when a session transcript/id is supplied.
+  counters. When the active model can be identified, the sidebar shows that
+  model's pool (`gemini-*` or `3p-*`); unrecognised names still use the lowest
+  remaining percentage across both pools. Agy has no reliable TTL field; its
+  cache rows appear only when a session transcript/id is supplied.
 
 Snapshots and refresh markers stay in Herdr's plugin state directory. No usage
 data is uploaded, browser cookies or browser keychains are read, and provider

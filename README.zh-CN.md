@@ -303,9 +303,10 @@ Herdr plugin API 只支持文本 token，不能由插件向原生 Agent renderer
   本身没有精确过期时间。[OpenAI prompt caching](https://openai.com/index/api-prompt-caching/)
 - **Agy/Antigravity：** 使用官方
   [`/usage` 和 statusline 文档](https://antigravity.google/docs/cli/commands/usage?app=antigravity-ide)
-  中的 Gemini、第三方额度池、context 已用百分比和最新缓存计数。两个额度池同时存在时，
-  取较低的剩余百分比，让单个 Agy 行保持保守；Agy 没有可靠的 TTL 字段，只有在
-  statusLine 提供 transcript/session 标识时才显示缓存累计行。
+  中的 Gemini、第三方额度池、context 已用百分比和最新缓存计数。能识别当前模型时，
+  侧栏只显示该模型所在池（`gemini-*` 或 `3p-*`）；无法识别时仍取两池较低剩余值。
+  Agy 没有可靠的 TTL 字段，只有在 statusLine 提供 transcript/session 标识时才显示
+  缓存累计行。
 
 快照和刷新标记保存在 Herdr 插件状态目录中。插件不会上传使用数据，不读取
 浏览器 Cookie/Keychain，不刷新或写入 provider 凭据。provider 失败时保留

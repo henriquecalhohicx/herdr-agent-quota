@@ -292,8 +292,8 @@ mod tests {
             snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
             Some(ResetAt::from_unix_seconds(5000))
         );
-        // remaining_percent should reflect 3p-5h (52 %), not min (0 %)
-        assert!(snapshot.window(WindowKind::FiveHour).unwrap().remaining_percent > 50.0);
+        assert_remaining_pct(&snapshot, WindowKind::FiveHour, 52.0);
+        assert_remaining_pct(&snapshot, WindowKind::Weekly, 84.0);
     }
 
     #[test]
@@ -315,7 +315,8 @@ mod tests {
             snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
             Some(ResetAt::from_unix_seconds(1000))
         );
-        assert!(snapshot.window(WindowKind::FiveHour).unwrap().remaining_percent > 70.0);
+        assert_remaining_pct(&snapshot, WindowKind::FiveHour, 75.0);
+        assert_remaining_pct(&snapshot, WindowKind::Weekly, 90.0);
     }
 
     #[test]
@@ -334,6 +335,33 @@ mod tests {
             snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
             Some(ResetAt::from_unix_seconds(5000))
         );
-        assert!(snapshot.window(WindowKind::FiveHour).unwrap().remaining_percent < 35.0);
+        assert_remaining_pct(&snapshot, WindowKind::FiveHour, 30.0);
+    }
+
+    #[test]
+    fn routes_gpt_oss_to_third_party_pool() {
+        let value = json!({
+            "model": {"display_name": "GPT-OSS 120B (Medium)"},
+            "quota": {
+                "gemini-5h": {"remaining_fraction": 0.0, "reset_in_seconds": 1000},
+                "3p-5h": {"remaining_fraction": 0.52, "reset_in_seconds": 5000},
+                "3p-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 90000}
+            }
+        });
+        let snapshot = parse_statusline(&value, 0).unwrap();
+        assert_eq!(
+            snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
+            Some(ResetAt::from_unix_seconds(5000))
+        );
+        assert_remaining_pct(&snapshot, WindowKind::FiveHour, 52.0);
+        assert_remaining_pct(&snapshot, WindowKind::Weekly, 84.0);
+    }
+
+    fn assert_remaining_pct(snapshot: &ProviderSnapshot, kind: WindowKind, expected: f64) {
+        let actual = snapshot.window(kind).unwrap().remaining_percent;
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "{kind:?} remaining {actual} != {expected}"
+        );
     }
 }

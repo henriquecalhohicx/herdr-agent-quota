@@ -35,44 +35,7 @@ pub fn parse_rate_limits(
     fetched_at_unix: u64,
 ) -> std::result::Result<ProviderSnapshot, ProviderError> {
     let result = value.get("result").unwrap_or(value);
-    let limits = result
-        .get("rateLimits")
-        .or_else(|| result.get("rate_limits"))
-        .ok_or_else(|| ProviderError::UnsupportedResponse("missing rateLimits".to_string()))?;
-    let mut windows = Vec::new();
-    for candidate in [limits.get("primary"), limits.get("secondary")]
-        .into_iter()
-        .flatten()
-    {
-        let Some(kind) = candidate
-            .get("windowDurationMins")
-            .or_else(|| candidate.get("window_duration_mins"))
-            .and_then(Value::as_u64)
-            .and_then(window_kind)
-        else {
-            continue;
-        };
-        if windows
-            .iter()
-            .any(|window: &UsageWindow| window.kind == kind)
-        {
-            continue;
-        }
-        let Some(used) = candidate
-            .get("usedPercent")
-            .or_else(|| candidate.get("used_percent"))
-            .and_then(Value::as_f64)
-        else {
-            continue;
-        };
-        let reset = candidate
-            .get("resetsAt")
-            .or_else(|| candidate.get("resets_at"))
-            .and_then(parse_reset);
-        let window = UsageWindow::new(kind, used, reset)
-            .map_err(|error| ProviderError::UnsupportedResponse(error.to_string()))?;
-        windows.push(window);
-    }
+    let windows = collect_codex_windows(result);
     if windows.is_empty() {
         return Err(ProviderError::UnsupportedResponse(
             "no supported rate limit windows".to_string(),
@@ -85,17 +48,85 @@ pub fn parse_rate_limits(
     ))
 }
 
+fn collect_codex_windows(value: &Value) -> Vec<UsageWindow> {
+    let mut windows = Vec::new();
+    let mut push_from = |limits: &Value| {
+        for candidate in [limits.get("primary"), limits.get("secondary")]
+            .into_iter()
+            .flatten()
+        {
+            let Some(window) = parse_codex_window(candidate) else {
+                continue;
+            };
+            if windows
+                .iter()
+                .any(|existing: &UsageWindow| existing.kind == window.kind)
+            {
+                continue;
+            }
+            windows.push(window);
+        }
+    };
+    if let Some(limits) = value.get("rateLimits").or_else(|| value.get("rate_limits")) {
+        push_from(limits);
+    }
+    if let Some(by_id) = value
+        .get("rateLimitsByLimitId")
+        .or_else(|| value.get("rate_limits_by_limit_id"))
+        .and_then(Value::as_object)
+    {
+        for limits in by_id.values() {
+            push_from(limits);
+        }
+    }
+    if value.get("primary").is_some() || value.get("secondary").is_some() {
+        push_from(value);
+    }
+    windows
+}
+
+fn parse_codex_window(candidate: &Value) -> Option<UsageWindow> {
+    if candidate.is_null() {
+        return None;
+    }
+    let kind = candidate
+        .get("windowDurationMins")
+        .or_else(|| candidate.get("window_duration_mins"))
+        .or_else(|| candidate.get("window_minutes"))
+        .and_then(json_u64)
+        .and_then(window_kind)?;
+    let used = candidate
+        .get("usedPercent")
+        .or_else(|| candidate.get("used_percent"))
+        .and_then(Value::as_f64)?;
+    let reset = candidate
+        .get("resetsAt")
+        .or_else(|| candidate.get("resets_at"))
+        .and_then(parse_reset);
+    UsageWindow::new(kind, used, reset).ok()
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        let number = value.as_f64()?;
+        (number.is_finite() && number >= 0.0).then_some(number.round() as u64)
+    })
+}
+
 fn window_kind(duration_minutes: u64) -> Option<WindowKind> {
-    match duration_minutes {
-        FIVE_HOUR_WINDOW_MINUTES => Some(WindowKind::FiveHour),
-        WEEKLY_WINDOW_MINUTES => Some(WindowKind::Weekly),
-        _ => None,
+    // Token-count headers sometimes report 299 / 10079 remaining minutes
+    // instead of the nominal 300 / 10080 window length.
+    if duration_minutes.abs_diff(FIVE_HOUR_WINDOW_MINUTES) <= 60 {
+        Some(WindowKind::FiveHour)
+    } else if duration_minutes.abs_diff(WEEKLY_WINDOW_MINUTES) <= 180 {
+        Some(WindowKind::Weekly)
+    } else {
+        None
     }
 }
 
 fn parse_reset(value: &Value) -> Option<ResetAt> {
-    value
-        .as_u64()
+    json_u64(value)
         .map(ResetAt::from_unix_seconds)
         .or_else(|| value.as_str().and_then(ResetAt::parse))
 }
@@ -260,6 +291,7 @@ fn enrich_local_sessions_at(snapshot: &mut ProviderSnapshot, home: &Path, sessio
         return;
     }
     let mut newest: Option<(u64, Option<String>, ContextUsage)> = None;
+    let mut newest_windows: Option<(u64, Vec<UsageWindow>)> = None;
     let rollout_paths = find_rollout_paths(home, session_ids);
     for session_id in session_ids {
         let Some(path) = rollout_paths.get(session_id) else {
@@ -271,6 +303,17 @@ fn enrich_local_sessions_at(snapshot: &mut ProviderSnapshot, home: &Path, sessio
         if let Some(model) = observation.model.clone() {
             snapshot.session_models.insert(session_id.clone(), model);
         }
+        let modified = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs());
+        if newest_windows
+            .as_ref()
+            .is_none_or(|(current, _)| modified >= *current)
+        {
+            newest_windows = Some((modified, observation.windows));
+        }
         let Some(context) = observation.context else {
             continue;
         };
@@ -278,16 +321,18 @@ fn enrich_local_sessions_at(snapshot: &mut ProviderSnapshot, home: &Path, sessio
             .session_contexts
             .insert(session_id.clone(), context.clone());
 
-        let modified = fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_secs());
         if newest
             .as_ref()
             .is_none_or(|(current, _, _)| modified >= *current)
         {
             newest = Some((modified, observation.model, context));
+        }
+    }
+    if let Some((_, windows)) = newest_windows {
+        for window in windows {
+            if snapshot.window(window.kind).is_none() {
+                snapshot.windows.push(window);
+            }
         }
     }
     if let Some((_, model, context)) = newest {
@@ -349,6 +394,7 @@ fn find_rollout_paths(home: &Path, session_ids: &[String]) -> BTreeMap<String, P
 struct RolloutObservation {
     model: Option<String>,
     context: Option<ContextUsage>,
+    windows: Vec<UsageWindow>,
 }
 
 fn read_rollout_observation(path: &Path, session_id: &str) -> Option<RolloutObservation> {
@@ -382,6 +428,7 @@ fn read_rollout_head_model(path: &Path) -> Option<String> {
 fn parse_rollout_observation(text: &str, session_id: &str) -> Option<RolloutObservation> {
     let mut model = None;
     let mut context = None;
+    let mut windows = Vec::new();
     for line in text.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -397,6 +444,9 @@ fn parse_rollout_observation(text: &str, session_id: &str) -> Option<RolloutObse
         let payload = entry.get("payload").unwrap_or(&entry);
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
+        }
+        if let Some(rate_limits) = payload.get("rate_limits") {
+            windows = collect_codex_windows(rate_limits);
         }
         let info = payload.get("info").unwrap_or(payload);
         let Some(last) = info
@@ -452,7 +502,11 @@ fn parse_rollout_observation(text: &str, session_id: &str) -> Option<RolloutObse
             .with_cache(cache);
         context = Some(context_value);
     }
-    Some(RolloutObservation { model, context })
+    Some(RolloutObservation {
+        model,
+        context,
+        windows,
+    })
 }
 
 fn parse_rollout_timestamp(value: &Value) -> Option<u64> {
@@ -694,6 +748,48 @@ mod tests {
     }
 
     #[test]
+    fn maps_near_five_hour_header_durations_to_the_five_hour_window() {
+        let value = json!({"result": {"rateLimits": {
+            "primary": {"usedPercent": 12.0, "windowDurationMins": 299, "resetsAt": 1786795200},
+            "secondary": {"usedPercent": 24.0, "windowDurationMins": 10079, "resetsAt": 1787400000}
+        }}});
+        let snapshot = parse_rate_limits(&value, 1).unwrap();
+        assert!(snapshot.window(WindowKind::FiveHour).is_some());
+        assert!(snapshot.window(WindowKind::Weekly).is_some());
+    }
+
+    #[test]
+    fn reads_a_five_hour_window_from_another_limit_id_bucket() {
+        let value = json!({
+            "result": {
+                "rateLimits": {
+                    "primary": {"usedPercent": 11.0, "windowDurationMins": 10080, "resetsAt": 1787400000},
+                    "secondary": null
+                },
+                "rateLimitsByLimitId": {
+                    "codex": {
+                        "primary": {"usedPercent": 11.0, "windowDurationMins": 10080, "resetsAt": 1787400000},
+                        "secondary": null
+                    },
+                    "codex_other": {
+                        "primary": {"usedPercent": 40.0, "windowDurationMins": 300, "resetsAt": 1786795200},
+                        "secondary": null
+                    }
+                }
+            }
+        });
+        let snapshot = parse_rate_limits(&value, 1).unwrap();
+        assert_eq!(
+            snapshot.window(WindowKind::FiveHour).unwrap().used_percent,
+            40.0
+        );
+        assert_eq!(
+            snapshot.window(WindowKind::Weekly).unwrap().used_percent,
+            11.0
+        );
+    }
+
+    #[test]
     fn reads_codex_account_id_from_local_auth_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("auth.json");
@@ -799,5 +895,63 @@ mod tests {
         assert_eq!(snapshot.model.as_deref(), Some("gpt-5.6"));
         assert!(snapshot.session_contexts.contains_key("session-1"));
         assert!(!snapshot.session_contexts.contains_key("other-session"));
+    }
+
+    #[test]
+    fn latest_rollout_rate_limits_fill_a_missing_five_hour_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let rollout_dir = directory.path().join("sessions/2026/08/27");
+        fs::create_dir_all(&rollout_dir).unwrap();
+        fs::write(
+            rollout_dir.join("rollout-session-1.jsonl"),
+            r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1786795200},"secondary":{"used_percent":24.0,"window_minutes":10080,"resets_at":1787400000}},"info":{"last_token_usage":{"total_tokens":25000},"model_context_window":100000}}}
+"#,
+        )
+        .unwrap();
+        let mut snapshot = parse_rate_limits(
+            &json!({"result":{"rateLimits":{
+                "primary":{"usedPercent":24.0,"windowDurationMins":10080,"resetsAt":1787400000},
+                "secondary":null
+            }}}),
+            1,
+        )
+        .unwrap();
+        enrich_local_sessions_at(&mut snapshot, directory.path(), &["session-1".to_string()]);
+        assert_eq!(
+            snapshot.window(WindowKind::FiveHour).unwrap().used_percent,
+            12.0
+        );
+        assert_eq!(
+            snapshot.window(WindowKind::Weekly).unwrap().used_percent,
+            24.0
+        );
+    }
+
+    #[test]
+    fn stale_rollout_five_hour_window_is_not_used_after_a_newer_weekly_only_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let rollout_dir = directory.path().join("sessions/2026/08/27");
+        fs::create_dir_all(&rollout_dir).unwrap();
+        fs::write(
+            rollout_dir.join("rollout-session-1.jsonl"),
+            r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":99.0,"window_minutes":300,"resets_at":1786795200},"secondary":{"used_percent":49.0,"window_minutes":10080,"resets_at":1787400000}}}}
+{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1787397000},"secondary":null},"info":{"last_token_usage":{"total_tokens":25000},"model_context_window":100000}}}
+"#,
+        )
+        .unwrap();
+        let mut snapshot = parse_rate_limits(
+            &json!({"result":{"rateLimits":{
+                "primary":{"usedPercent":0.0,"windowDurationMins":10080,"resetsAt":1787397000},
+                "secondary":null
+            }}}),
+            1,
+        )
+        .unwrap();
+        enrich_local_sessions_at(&mut snapshot, directory.path(), &["session-1".to_string()]);
+        assert!(snapshot.window(WindowKind::FiveHour).is_none());
+        assert_eq!(
+            snapshot.window(WindowKind::Weekly).unwrap().used_percent,
+            0.0
+        );
     }
 }

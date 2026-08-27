@@ -52,6 +52,14 @@ impl Provider {
             Self::Agy => "agy-statusline",
         }
     }
+
+    /// Whether this provider has a five-hour quota window to display.
+    ///
+    /// Grok's credits contract has no 5h bucket, so the sidebar must not
+    /// invent a `5h N/A` row for it. Codex, Claude, and Agy all expose one.
+    pub fn exposes_five_hour_quota(self) -> bool {
+        !matches!(self, Self::Grok)
+    }
 }
 
 impl std::str::FromStr for Provider {
@@ -438,6 +446,41 @@ impl ProviderSnapshot {
         self.windows.iter().find(|window| window.kind == kind)
     }
 
+    /// Keep a previously observed quota window when the latest payload omits
+    /// it. Upstream often drops the short window for a tick (Claude statusLine
+    /// without `five_hour`, Codex `secondary: null` after a reset credit).
+    ///
+    /// This never invents percentages. An omitted window is restored only when
+    /// its reset is still in the future and a sibling window present in both
+    /// snapshots has not itself reset. An empty `windows` list still means
+    /// "rate limits were absent — clear stale quota".
+    pub fn merge_omitted_windows(&mut self, previous: &Self) {
+        if self.windows.is_empty() {
+            return;
+        }
+        if !same_quota_account(self, previous) {
+            return;
+        }
+        if sibling_quota_reset(self, previous) {
+            return;
+        }
+        for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+            if self.window(kind).is_some() {
+                continue;
+            }
+            let Some(previous_window) = previous.window(kind).cloned() else {
+                continue;
+            };
+            let Some(reset) = previous_window.resets_at else {
+                continue;
+            };
+            if reset.unix_seconds() <= self.fetched_at_unix {
+                continue;
+            }
+            self.windows.push(previous_window);
+        }
+    }
+
     pub fn severity(&self, now_unix: u64) -> Severity {
         let relevant = match self.provider {
             Provider::Grok => self.window(WindowKind::Weekly),
@@ -449,6 +492,37 @@ impl ProviderSnapshot {
             .map(|window| Severity::for_window(window, now_unix))
             .unwrap_or(Severity::Unknown)
     }
+}
+
+fn same_quota_account(current: &ProviderSnapshot, previous: &ProviderSnapshot) -> bool {
+    match (
+        current.account_id.as_deref(),
+        previous.account_id.as_deref(),
+    ) {
+        (Some(current_id), Some(previous_id)) => current_id == previous_id,
+        _ => true,
+    }
+}
+
+fn sibling_quota_reset(current: &ProviderSnapshot, previous: &ProviderSnapshot) -> bool {
+    const USED_PERCENT_RESET_DROP: f64 = 5.0;
+    [WindowKind::FiveHour, WindowKind::Weekly]
+        .into_iter()
+        .any(|kind| {
+            let (Some(current_window), Some(previous_window)) =
+                (current.window(kind), previous.window(kind))
+            else {
+                return false;
+            };
+            if let (Some(current_reset), Some(previous_reset)) =
+                (current_window.resets_at, previous_window.resets_at)
+            {
+                if current_reset != previous_reset {
+                    return true;
+                }
+            }
+            current_window.used_percent + USED_PERCENT_RESET_DROP < previous_window.used_percent
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,5 +777,95 @@ mod tests {
         assert_eq!(Provider::Grok.badge(), "[X]");
         assert_eq!(Provider::Codex.icon(), "◈C");
         assert_eq!(Provider::Claude.icon(), "✦Cl");
+        assert!(Provider::Codex.exposes_five_hour_quota());
+        assert!(Provider::Claude.exposes_five_hour_quota());
+        assert!(!Provider::Grok.exposes_five_hour_quota());
+    }
+
+    fn quota_window(kind: WindowKind, used: f64, reset: u64) -> UsageWindow {
+        UsageWindow::new(kind, used, Some(ResetAt::from_unix_seconds(reset))).unwrap()
+    }
+
+    #[test]
+    fn omitted_five_hour_window_is_kept_when_weekly_did_not_reset() {
+        let previous = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![
+                quota_window(WindowKind::FiveHour, 22.0, 2_000),
+                quota_window(WindowKind::Weekly, 65.0, 10_000),
+            ],
+            1_000,
+        );
+        let mut current = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![quota_window(WindowKind::Weekly, 66.0, 10_000)],
+            1_100,
+        );
+        current.merge_omitted_windows(&previous);
+        assert_eq!(
+            current.window(WindowKind::FiveHour).unwrap().used_percent,
+            22.0
+        );
+        assert_eq!(
+            current.window(WindowKind::Weekly).unwrap().used_percent,
+            66.0
+        );
+    }
+
+    #[test]
+    fn omitted_five_hour_window_is_dropped_when_weekly_resets() {
+        let previous = ProviderSnapshot::new(
+            Provider::Codex,
+            vec![
+                quota_window(WindowKind::FiveHour, 99.0, 8_000),
+                quota_window(WindowKind::Weekly, 49.0, 10_000),
+            ],
+            1_000,
+        );
+        let mut current = ProviderSnapshot::new(
+            Provider::Codex,
+            vec![quota_window(WindowKind::Weekly, 0.0, 9_700)],
+            1_200,
+        );
+        current.merge_omitted_windows(&previous);
+        assert!(current.window(WindowKind::FiveHour).is_none());
+        assert_eq!(
+            current.window(WindowKind::Weekly).unwrap().used_percent,
+            0.0
+        );
+    }
+
+    #[test]
+    fn empty_windows_still_clear_stale_quota() {
+        let previous = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![
+                quota_window(WindowKind::FiveHour, 22.0, 2_000),
+                quota_window(WindowKind::Weekly, 65.0, 10_000),
+            ],
+            1_000,
+        );
+        let mut current = ProviderSnapshot::new(Provider::Claude, vec![], 1_100);
+        current.merge_omitted_windows(&previous);
+        assert!(current.windows.is_empty());
+    }
+
+    #[test]
+    fn expired_five_hour_window_is_not_preserved() {
+        let previous = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![
+                quota_window(WindowKind::FiveHour, 22.0, 1_050),
+                quota_window(WindowKind::Weekly, 65.0, 10_000),
+            ],
+            1_000,
+        );
+        let mut current = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![quota_window(WindowKind::Weekly, 65.0, 10_000)],
+            1_100,
+        );
+        current.merge_omitted_windows(&previous);
+        assert!(current.window(WindowKind::FiveHour).is_none());
     }
 }

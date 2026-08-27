@@ -371,14 +371,17 @@ fn add_provider_rows(agents: &mut Table, rows: &Array) -> Result<()> {
 }
 
 fn provider_rows(rows: &Array, color: Option<&str>, provider: &str) -> Array {
-    let weekly_only = provider == "grok";
-    let context_index = if weekly_only {
+    // Grok never has a 5h window. Codex often doesn't either after a reset,
+    // so both fold the quota tokens onto the context row. Herdr then elides
+    // empty `$quota_5h_*` values and the card looks like Grok's weekly line.
+    let merge_windows_into_context = provider == "grok" || provider == "codex";
+    let context_index = if merge_windows_into_context {
         rows.iter()
             .position(|row| row_contains_token(row, "$quota_context"))
     } else {
         None
     };
-    let window_index = if weekly_only {
+    let window_index = if merge_windows_into_context {
         rows.iter().position(|row| {
             row_contains_token(row, "$quota_5h_normal")
                 || row_contains_token(row, "$quota_week_normal")

@@ -61,6 +61,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Codex and Claude no longer drop a still-current five-hour window when the
+  latest payload omits it. The previous 5h value is restored only when its
+  reset is still in the future and a sibling window present in both snapshots
+  has not itself reset; an empty window list still clears stale quota.
+- Codex also reads five-hour limits from `rateLimitsByLimitId`, from
+  near-duration token-count headers, and from the latest matching local
+  rollout when the app-server omits `secondary`. A newer weekly-only event
+  does not restore a stale 5h value. When 5h is genuinely absent, Codex
+  elides `$quota_5h` like Grok so the card reads `context · 7d`.
 - Codex quota parsing now keeps both provider-reported five-hour and seven-day
   windows. It identifies each window by duration instead of assuming that
   `primary` or `secondary` has a fixed meaning, so the restored five-hour limit

@@ -65,6 +65,7 @@ impl MetadataTokens {
     ) -> Self {
         let quota_provider = snapshot.provider.display_name().to_string();
         let quota_model = model.unwrap_or_default().to_string();
+        let quota_5h = sidebar_window(snapshot, WindowKind::FiveHour, now_unix);
         Self {
             quota_state: snapshot.severity(now_unix).symbol().to_string(),
             quota_icon: snapshot.provider.icon().to_string(),
@@ -72,8 +73,9 @@ impl MetadataTokens {
             quota_provider,
             quota_model,
             quota_status: snapshot.severity(now_unix).label().to_string(),
-            quota_5h: sidebar_window(snapshot, WindowKind::FiveHour, now_unix),
-            quota_5h_severity: window_severity(snapshot, WindowKind::FiveHour, now_unix),
+            quota_5h_severity: window_severity(snapshot, WindowKind::FiveHour, now_unix)
+                .or_else(|| missing_five_hour_severity(snapshot.provider, &quota_5h)),
+            quota_5h,
             quota_week: sidebar_window(snapshot, WindowKind::Weekly, now_unix),
             quota_week_severity: window_severity(snapshot, WindowKind::Weekly, now_unix),
             quota_summary: sidebar_summary(snapshot, now_unix),
@@ -93,14 +95,10 @@ impl MetadataTokens {
             quota_provider,
             quota_model: String::new(),
             quota_status: Severity::Unknown.label().to_string(),
-            quota_5h: match provider {
-                Provider::Claude | Provider::Agy => "5h N/A".to_string(),
-                Provider::Codex | Provider::Grok => String::new(),
-            },
-            quota_5h_severity: match provider {
-                Provider::Claude | Provider::Agy => Some(Severity::Unknown),
-                Provider::Codex | Provider::Grok => None,
-            },
+            quota_5h: missing_five_hour_label(provider)
+                .unwrap_or_default()
+                .to_string(),
+            quota_5h_severity: missing_five_hour_label(provider).map(|_| Severity::Unknown),
             quota_week: "7d N/A".to_string(),
             quota_week_severity: Some(Severity::Unknown),
             quota_summary: "unavailable".to_string(),
@@ -148,10 +146,29 @@ fn summary(snapshot: &ProviderSnapshot, now_unix: u64, include_left: bool) -> St
 }
 
 fn sidebar_window(snapshot: &ProviderSnapshot, kind: WindowKind, now_unix: u64) -> String {
-    snapshot
-        .window(kind)
-        .map(|window| format_compact_window(window, now_unix))
-        .unwrap_or_default()
+    if let Some(window) = snapshot.window(kind) {
+        return format_compact_window(window, now_unix);
+    }
+    if kind == WindowKind::FiveHour {
+        return missing_five_hour_label(snapshot.provider)
+            .unwrap_or_default()
+            .to_string();
+    }
+    String::new()
+}
+
+fn missing_five_hour_label(provider: Provider) -> Option<&'static str> {
+    // Codex matches Grok: omit the 5h token so Herdr splices 7d onto context.
+    // Claude/Agy keep a visible placeholder on their separate limits row.
+    match provider {
+        Provider::Claude | Provider::Agy => Some("5h N/A"),
+        Provider::Codex | Provider::Grok => None,
+    }
+}
+
+fn missing_five_hour_severity(provider: Provider, quota_5h: &str) -> Option<Severity> {
+    (quota_5h == "5h N/A" && missing_five_hour_label(provider).is_some())
+        .then_some(Severity::Unknown)
 }
 
 fn sidebar_context(context: Option<&crate::model::ContextUsage>) -> String {
@@ -490,6 +507,32 @@ mod tests {
         );
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
         assert_eq!(values.quota_week, "7d 69% 6d0h");
+        assert_eq!(values.quota_5h, "");
+        assert_eq!(values.quota_5h_severity, None);
+    }
+
+    #[test]
+    fn claude_keeps_a_five_hour_placeholder_on_the_limits_row() {
+        let snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![window(WindowKind::Weekly, 31.0, 518_400)],
+            0,
+        );
+        let values = MetadataTokens::from_snapshot(&snapshot, 0);
+        assert_eq!(values.quota_5h, "5h N/A");
+        assert_eq!(values.quota_5h_severity, Some(Severity::Unknown));
+    }
+
+    #[test]
+    fn grok_does_not_invent_a_five_hour_row() {
+        let snapshot = ProviderSnapshot::new(
+            Provider::Grok,
+            vec![window(WindowKind::Weekly, 31.0, 518_400)],
+            0,
+        );
+        let values = MetadataTokens::from_snapshot(&snapshot, 0);
+        assert_eq!(values.quota_5h, "");
+        assert_eq!(values.quota_5h_severity, None);
     }
 
     #[test]

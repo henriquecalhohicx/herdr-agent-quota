@@ -231,17 +231,31 @@ fn provider_model_is_compact_and_grok_merges_weekly_limit_into_context_row() {
         )
     }));
 
-    let grok_rows = agents["rows_by_agent"]["grok"].as_array().unwrap();
-    let context_row = grok_rows
-        .iter()
-        .find(|row| row_contains_token(row, "$quota_context"))
-        .unwrap()
-        .as_array()
-        .unwrap();
-    assert!(context_row
-        .iter()
-        .any(|item| configured_token(item) == Some("$quota_week_normal")));
-    assert!(!grok_rows.iter().any(|row| {
+    for provider in ["grok", "codex"] {
+        let provider_rows = agents["rows_by_agent"][provider].as_array().unwrap();
+        let context_row = provider_rows
+            .iter()
+            .find(|row| row_contains_token(row, "$quota_context"))
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            context_row
+                .iter()
+                .any(|item| configured_token(item) == Some("$quota_week_normal")),
+            "{provider} should splice 7d onto the context row"
+        );
+        assert!(
+            !provider_rows.iter().any(|row| {
+                row_contains_token(row, "$quota_week_normal")
+                    && !row_contains_token(row, "$quota_context")
+            }),
+            "{provider} should not keep a separate weekly-only limits row"
+        );
+    }
+
+    let claude_rows = agents["rows_by_agent"]["claude"].as_array().unwrap();
+    assert!(claude_rows.iter().any(|row| {
         row_contains_token(row, "$quota_week_normal") && !row_contains_token(row, "$quota_context")
     }));
 }

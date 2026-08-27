@@ -283,10 +283,10 @@ rows = [
   cards are easy to scan. Cache, TTL, and context share one muted diagnostic
   color (`#9aa7b8`); only quota runway health and explicit errors use green,
   amber, and red.
-- For Grok's weekly-only quota, `rows_by_agent.grok` puts the weekly limit on
-  the context row because there is no five-hour value to occupy a separate
-  slot. Other providers keep context as the penultimate row and limits as the
-  final row.
+- For Grok, and for Codex when OpenAI omits the five-hour window,
+  `rows_by_agent` puts the weekly limit on the context row. Empty `$quota_5h`
+  tokens are elided, so the card reads `context · 7d`. Claude and Agy keep
+  context as the penultimate row and limits as the final row.
 - Claude and Agy statusLine diagnostics are keyed by session. A new session
   starts without the previous session's cache/context values; Codex and Grok
   read only visible session files. If Herdr exposes no session id for a pane,

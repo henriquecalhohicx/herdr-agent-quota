@@ -74,9 +74,11 @@ impl CacheStore {
     }
 
     /// Keep provider-local diagnostics when a successful quota refresh cannot
-    /// read one of the session files for a moment. Quota windows are still
-    /// replaced immediately; diagnostics are merged only for the same signed
-    /// in account so a login switch can never inherit another user's data.
+    /// read one of the session files for a moment. Quota windows from the
+    /// latest fetch replace the cache; an omitted 5h/weekly window is restored
+    /// from the previous snapshot only when that window is still current.
+    /// Diagnostics are merged only for the same signed in account so a login
+    /// switch can never inherit another user's data.
     pub fn save_preserving_diagnostics(&self, mut snapshot: ProviderSnapshot) -> Result<()> {
         self.save_preserving_diagnostics_for_sessions(&mut snapshot, &[])
     }
@@ -92,6 +94,7 @@ impl CacheStore {
         if let Some(previous) = self.load(snapshot.provider).ok().flatten() {
             let same_account = snapshot.account_id == previous.account_id;
             if same_account {
+                snapshot.merge_omitted_windows(&previous);
                 if session_ids.is_empty() {
                     if snapshot.context.is_none() {
                         snapshot.context = previous.context.clone();
@@ -219,8 +222,9 @@ impl CacheStore {
     }
 
     /// StatusLine payloads may temporarily omit context (before the first
-    /// response and immediately after compaction). Keep the last known value
-    /// while still replacing the quota windows with the newest snapshot.
+    /// response and immediately after compaction). Keep the last known value.
+    /// Quota windows still come from the newest snapshot, except an omitted
+    /// 5h/weekly window is restored when it is still current.
     pub fn save_preserving_context(&self, snapshot: ProviderSnapshot) -> Result<()> {
         self.save_preserving_context_for_session(snapshot, None)
     }
@@ -245,6 +249,9 @@ impl CacheStore {
         // A malformed/temporarily unreadable old snapshot must not prevent a
         // fresh statusLine value from replacing it.
         let previous = self.load(snapshot.provider).ok().flatten();
+        if let Some(previous) = previous.as_ref() {
+            snapshot.merge_omitted_windows(previous);
+        }
         let previous_session_id = previous
             .as_ref()
             .and_then(|snapshot| snapshot.context.as_ref())
@@ -605,7 +612,7 @@ fn sessions_match(previous_session_id: Option<&str>, session_id: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CacheUsage, ContextUsage, Provider, UsageWindow, WindowKind};
+    use crate::model::{CacheUsage, ContextUsage, Provider, ResetAt, UsageWindow, WindowKind};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -968,6 +975,51 @@ mod tests {
         let directory = tempdir().unwrap();
         let cache = CacheStore::new(directory.path());
         assert_eq!(cache.load(Provider::Claude).unwrap(), None);
+    }
+
+    #[test]
+    fn statusline_refresh_preserves_an_omitted_five_hour_window() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        let previous = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![
+                UsageWindow::new(
+                    WindowKind::FiveHour,
+                    22.0,
+                    Some(ResetAt::from_unix_seconds(2_000)),
+                )
+                .unwrap(),
+                UsageWindow::new(
+                    WindowKind::Weekly,
+                    65.0,
+                    Some(ResetAt::from_unix_seconds(10_000)),
+                )
+                .unwrap(),
+            ],
+            1_000,
+        );
+        cache.save(&previous).unwrap();
+
+        let current = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![UsageWindow::new(
+                WindowKind::Weekly,
+                66.0,
+                Some(ResetAt::from_unix_seconds(10_000)),
+            )
+            .unwrap()],
+            1_100,
+        );
+        cache
+            .save_preserving_context_for_session(current, Some("session-1"))
+            .unwrap();
+        let saved = cache.load(Provider::Claude).unwrap().unwrap();
+        assert_eq!(
+            saved.window(WindowKind::FiveHour).unwrap().used_percent,
+            22.0
+        );
+        assert_eq!(saved.window(WindowKind::Weekly).unwrap().used_percent, 66.0);
     }
 
     #[test]

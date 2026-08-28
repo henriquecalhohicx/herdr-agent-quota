@@ -150,6 +150,9 @@ fn default_herdr_rows_become_plane_provider_usage_and_topic_lines() {
     assert!(applied.contains("$quota_week_normal"));
     assert!(applied.contains("$quota_week_warning"));
     assert!(applied.contains("$quota_week_danger"));
+    assert!(applied.contains("$quota_week_inline_normal"));
+    assert!(applied.contains("$quota_week_inline_warning"));
+    assert!(applied.contains("$quota_week_inline_danger"));
     assert!(!applied.contains("[\"$quota_summary\"]"));
     assert!(applied.contains("$quota_topic"));
     assert!(applied.contains("$quota_context"));
@@ -213,7 +216,7 @@ fn context_is_the_penultimate_row_and_model_shares_provider_style() {
 }
 
 #[test]
-fn provider_model_is_compact_and_grok_merges_weekly_limit_into_context_row() {
+fn provider_model_is_compact_and_every_provider_can_fold_week_without_five_hour() {
     let applied =
         add_quota_row("[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\"]]\n").unwrap();
     let document = applied.parse::<toml_edit::DocumentMut>().unwrap();
@@ -231,7 +234,7 @@ fn provider_model_is_compact_and_grok_merges_weekly_limit_into_context_row() {
         )
     }));
 
-    for provider in ["grok", "codex"] {
+    for provider in ["claude", "codex", "grok", "agy"] {
         let provider_rows = agents["rows_by_agent"][provider].as_array().unwrap();
         let context_row = provider_rows
             .iter()
@@ -242,22 +245,24 @@ fn provider_model_is_compact_and_grok_merges_weekly_limit_into_context_row() {
         assert!(
             context_row
                 .iter()
-                .any(|item| configured_token(item) == Some("$quota_week_normal")),
-            "{provider} should splice 7d onto the context row"
+                .any(|item| configured_token(item) == Some("$quota_week_inline_normal")),
+            "{provider} should be able to fold 7d onto context when 5h is empty"
         );
         assert!(
-            !provider_rows.iter().any(|row| {
+            context_row
+                .iter()
+                .all(|item| configured_token(item) != Some("$quota_5h_normal")),
+            "{provider} must not put 5h on the context row"
+        );
+        assert!(
+            provider_rows.iter().any(|row| {
                 row_contains_token(row, "$quota_week_normal")
+                    && row_contains_token(row, "$quota_5h_normal")
                     && !row_contains_token(row, "$quota_context")
             }),
-            "{provider} should not keep a separate weekly-only limits row"
+            "{provider} should keep 5h/7d on a dedicated limits row"
         );
     }
-
-    let claude_rows = agents["rows_by_agent"]["claude"].as_array().unwrap();
-    assert!(claude_rows.iter().any(|row| {
-        row_contains_token(row, "$quota_week_normal") && !row_contains_token(row, "$quota_context")
-    }));
 }
 
 #[test]

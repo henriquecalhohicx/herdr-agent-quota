@@ -204,7 +204,12 @@ rows = [
     { token = "$quota_cache_ttl", fg = "#9aa7b8", bold = true, dim = false },
     { token = "$quota_error", fg = "#ca6470", bold = true, dim = false },
   ],
-  [{ token = "$quota_context", fg = "#9aa7b8", bold = true, dim = false }],
+  [
+    { token = "$quota_context", fg = "#9aa7b8", bold = true, dim = false },
+    { token = "$quota_week_inline_normal", fg = "#84b084", bold = true, dim = false },
+    { token = "$quota_week_inline_warning", fg = "#cdaa65", bold = true, dim = false },
+    { token = "$quota_week_inline_danger", fg = "#ca6470", bold = true, dim = false },
+  ],
   [
     { token = "$quota_5h_normal", fg = "#84b084", bold = true, dim = false },
     { token = "$quota_5h_warning", fg = "#cdaa65", bold = true, dim = false },
@@ -240,10 +245,11 @@ rows = [
   不做猜测。
 - provider 和 model 共用各自 provider 的品牌色，方便快速识别；cache、TTL 和 context
   共用一套低饱和诊断色（`#9aa7b8`），只有额度 limit 和明确错误使用绿/琥珀/红色。
-- Grok 只有周额度；Codex 在 OpenAI 不返回 5h 时也一样。两者的 `rows_by_agent`
-  都会把周 limit 拼到 context 同一行，空的 `$quota_5h` token 会被隐掉，
-  看起来就是 `context · 7d`。Claude 和 Agy 仍保持 context 倒数第二行、
-  limit 最后一行。
+- 只要 5h 有值，5h 和 7d 就留在 limit 行，不和 context 同一行。5h 为空时，
+  周额度改发到 context 行（`$quota_week_inline_*`），空的 limit 行会被隐掉，
+  看起来就是 `context · 7d`。这是按 token 有没有 5h 动态判断的，不按
+  provider 名称写死：Codex 在 OpenAI 返回 5h 时分行，没有 5h 时折叠；Grok
+  保持紧凑；Claude 和 Agy 继续用独立 limit 行（包括 `5h N/A` 占位）。
 - Claude/Agy 的 statusLine 诊断按 session 隔离，新 session 不会继承上一 session 的
   cache/context。Codex/Grok 只读取可匹配的本地会话文件；如果 pane 没有 session id，
   会先隐藏本地 context/cache，直到能匹配当前会话。每个 provider 的 session 诊断最多

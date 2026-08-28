@@ -236,7 +236,12 @@ rows = [
     { token = "$quota_cache_ttl", fg = "#9aa7b8", bold = true, dim = false },
     { token = "$quota_error", fg = "#ca6470", bold = true, dim = false },
   ],
-  [{ token = "$quota_context", fg = "#9aa7b8", bold = true, dim = false }],
+  [
+    { token = "$quota_context", fg = "#9aa7b8", bold = true, dim = false },
+    { token = "$quota_week_inline_normal", fg = "#84b084", bold = true, dim = false },
+    { token = "$quota_week_inline_warning", fg = "#cdaa65", bold = true, dim = false },
+    { token = "$quota_week_inline_danger", fg = "#ca6470", bold = true, dim = false },
+  ],
   [
     { token = "$quota_5h_normal", fg = "#84b084", bold = true, dim = false },
     { token = "$quota_5h_warning", fg = "#cdaa65", bold = true, dim = false },
@@ -283,10 +288,13 @@ rows = [
   cards are easy to scan. Cache, TTL, and context share one muted diagnostic
   color (`#9aa7b8`); only quota runway health and explicit errors use green,
   amber, and red.
-- For Grok, and for Codex when OpenAI omits the five-hour window,
-  `rows_by_agent` puts the weekly limit on the context row. Empty `$quota_5h`
-  tokens are elided, so the card reads `context · 7d`. Claude and Agy keep
-  context as the penultimate row and limits as the final row.
+- If a five-hour window is present, 5h and 7d stay on the limits row, never
+  on the same line as context. If 5h is empty, the weekly token is published
+  on the context row instead (`$quota_week_inline_*`) and the empty limits
+  row disappears, so the card reads `context · 7d`. This is decided from the
+  tokens, not the provider name: Codex splits when OpenAI returns 5h and
+  folds when it does not; Grok stays compact; Claude and Agy keep a dedicated
+  limits row, including the `5h N/A` placeholder.
 - Claude and Agy statusLine diagnostics are keyed by session. A new session
   starts without the previous session's cache/context values; Codex and Grok
   read only visible session files. If Herdr exposes no session id for a pane,

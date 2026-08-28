@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Sidebar cards now decide from the 5h token, not the provider name, whether
+  weekly quota sits beside context. A present 5h window keeps `5h` and `7d`
+  on the limits row so they never share a line with context; an empty 5h
+  publishes week on the context row instead, so weekly-only cards still read
+  `context · 7d`. Codex can therefore split when OpenAI returns 5h and fold
+  after a reset; Grok, Claude, and Agy keep their previous visual shape.
 - Agy/Antigravity quota now shows the pool that the active model actually
   draws from instead of the conservative minimum across both pools. Gemini-family
   model names (`gemini`, `flash`, `learnlm`) select the `gemini-*` pool;

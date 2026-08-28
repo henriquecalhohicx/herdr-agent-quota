@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -53,12 +53,17 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>) -> Result<()
     };
 
     let started = Instant::now();
+    let started_at = SystemTime::now();
     let started_millis = CacheStore::now_millis();
     let interval = Duration::from_secs(interval_seconds);
     let mut previous_active = Vec::new();
     loop {
         if cache.turn_watchers_stopped_after(started_millis)? {
             break;
+        }
+        if watch_binary_is_newer(started_at, current_exe_modified()) {
+            drop(_lock);
+            return reexec_watch();
         }
         // A transient Herdr failure should not terminate a live watcher; the
         // one-hour cap below still prevents an orphaned process. The next
@@ -398,6 +403,38 @@ fn is_working_status(status: &str) -> bool {
     status.eq_ignore_ascii_case("working")
 }
 
+fn current_exe_modified() -> Option<SystemTime> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())
+}
+
+fn watch_binary_is_newer(started: SystemTime, modified: Option<SystemTime>) -> bool {
+    modified.is_some_and(|mtime| mtime > started)
+}
+
+fn reexec_watch() -> Result<()> {
+    let executable = std::env::current_exe().context("resolve plugin executable")?;
+    let mut command = Command::new(executable);
+    command.args(["watch", "--provider", "all"]);
+    #[cfg(unix)]
+    {
+        let error = command.exec();
+        anyhow::bail!("re-exec active-turn quota watcher: {error}");
+    }
+    #[cfg(not(unix))]
+    {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("restart active-turn quota watcher")?;
+        Ok(())
+    }
+}
+
 fn spawn_watch() -> Result<()> {
     let executable = std::env::current_exe().context("resolve plugin executable")?;
     let mut command = Command::new(executable);
@@ -472,6 +509,20 @@ mod tests {
     use super::*;
     use crate::model::{ProviderSnapshot, UsageWindow, WindowKind};
     use tempfile::tempdir;
+
+    #[test]
+    fn replaced_watch_binary_is_detected() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        assert!(watch_binary_is_newer(
+            started,
+            Some(started + Duration::from_secs(1))
+        ));
+        assert!(!watch_binary_is_newer(
+            started,
+            Some(started - Duration::from_secs(1))
+        ));
+        assert!(!watch_binary_is_newer(started, None));
+    }
 
     #[test]
     fn successful_snapshot_is_kept_when_provider_refresh_fails() {

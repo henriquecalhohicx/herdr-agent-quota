@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
-const QUOTA_ROW_MARKERS: [&str; 25] = [
+const QUOTA_ROW_MARKERS: [&str; 29] = [
     "$quota_badge",
     "$quota_state",
     "$quota_icon",
@@ -29,6 +29,10 @@ const QUOTA_ROW_MARKERS: [&str; 25] = [
     "$quota_week_warning",
     "$quota_week_danger",
     "$quota_week_unknown",
+    "$quota_week_inline_normal",
+    "$quota_week_inline_warning",
+    "$quota_week_inline_danger",
+    "$quota_week_inline_unknown",
 ];
 const ROW_GAP_MARKER: &str = "herdr-agent-quota";
 const PROVIDER_STYLE_MARKER: &str = "herdr-agent-quota-provider";
@@ -361,7 +365,7 @@ fn add_provider_rows(agents: &mut Table, rows: &Array) -> Result<()> {
         if rows_by_agent.contains_key(provider) && !is_managed {
             continue;
         }
-        let mut value = Value::Array(provider_rows(rows, color, provider));
+        let mut value = Value::Array(provider_rows(rows, color));
         value
             .decor_mut()
             .set_suffix(format!(" # {PROVIDER_STYLE_MARKER}"));
@@ -370,43 +374,16 @@ fn add_provider_rows(agents: &mut Table, rows: &Array) -> Result<()> {
     Ok(())
 }
 
-fn provider_rows(rows: &Array, color: Option<&str>, provider: &str) -> Array {
-    // Grok never has a 5h window. Codex often doesn't either after a reset,
-    // so both fold the quota tokens onto the context row. Herdr then elides
-    // empty `$quota_5h_*` values and the card looks like Grok's weekly line.
-    let merge_windows_into_context = provider == "grok" || provider == "codex";
-    let context_index = if merge_windows_into_context {
-        rows.iter()
-            .position(|row| row_contains_token(row, "$quota_context"))
-    } else {
-        None
-    };
-    let window_index = if merge_windows_into_context {
-        rows.iter().position(|row| {
-            row_contains_token(row, "$quota_5h_normal")
-                || row_contains_token(row, "$quota_week_normal")
-        })
-    } else {
-        None
-    };
-    let window_items = window_index
-        .and_then(|index| rows.get(index))
-        .and_then(Value::as_array);
+fn provider_rows(rows: &Array, color: Option<&str>) -> Array {
+    // Brand color only. Whether 5h sits on its own row or 7d folds onto
+    // context is decided at publish time from the 5h token, not here.
     let mut themed = Array::new();
-    for (index, row) in rows.iter().enumerate() {
-        if window_index == Some(index) && context_index != Some(index) {
-            continue;
-        }
+    for row in rows.iter() {
         let Some(items) = row.as_array() else {
             continue;
         };
         let mut themed_row = Array::new();
         append_themed_provider_row(&mut themed_row, items, color);
-        if context_index == Some(index) {
-            if let Some(window_items) = window_items {
-                append_themed_provider_row(&mut themed_row, window_items, color);
-            }
-        }
         themed.push(Value::Array(themed_row));
     }
     themed
@@ -425,14 +402,6 @@ fn append_themed_provider_row(row: &mut Array, items: &Array, color: Option<&str
             row.push(item.clone());
         }
     }
-}
-
-fn row_contains_token(row: &Value, token: &str) -> bool {
-    row.as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| configured_token_name(item) == Some(token))
-    })
 }
 
 fn remove_managed_provider_rows(agents: &mut Table) {
@@ -509,9 +478,9 @@ fn normalize_official_row(row: Array) -> Array {
 }
 
 fn append_quota_rows(rows: &mut Array) {
-    // Keep the official state row and put both quota windows on one compact
-    // row. Herdr elides missing tokens and their separators, so weekly-only
-    // providers do not gain a blank five-hour segment.
+    // Context can carry the weekly token when 5h is empty. Limits stay on the
+    // next row so a present 5h window never shares a line with context. Herdr
+    // drops empty tokens and empty rows.
     for row in rows.iter_mut() {
         let Some(items) = row.as_array_mut() else {
             continue;
@@ -593,12 +562,14 @@ fn append_quota_rows(rows: &mut Array) {
 
     append_cache_row(rows);
 
-    rows.push(Value::Array(styled_row(
+    let mut context_row = styled_row(
         "$quota_context",
         Some(DIAGNOSTIC_COLOR),
         Some(true),
         Some(false),
-    )));
+    );
+    append_window_style_tokens(&mut context_row, "quota_week_inline");
+    rows.push(Value::Array(context_row));
 
     append_window_row(rows);
 }
@@ -626,27 +597,25 @@ fn append_cache_row(rows: &mut Array) {
     ])));
 }
 
+fn append_window_style_tokens(row: &mut Array, base: &str) {
+    for (suffix, color) in [
+        ("normal", QUOTA_SAFE_COLOR),
+        ("warning", QUOTA_WARNING_COLOR),
+        ("danger", QUOTA_DANGER_COLOR),
+    ] {
+        row.push(styled_token(
+            &format!("${base}_{suffix}"),
+            Some(color),
+            Some(true),
+            Some(false),
+        ));
+    }
+}
+
 fn append_window_row(rows: &mut Array) {
     let mut row = Array::new();
     for base in ["quota_5h", "quota_week"] {
-        row.push(styled_token(
-            &format!("${base}_normal"),
-            Some(QUOTA_SAFE_COLOR),
-            Some(true),
-            Some(false),
-        ));
-        row.push(styled_token(
-            &format!("${base}_warning"),
-            Some(QUOTA_WARNING_COLOR),
-            Some(true),
-            Some(false),
-        ));
-        row.push(styled_token(
-            &format!("${base}_danger"),
-            Some(QUOTA_DANGER_COLOR),
-            Some(true),
-            Some(false),
-        ));
+        append_window_style_tokens(&mut row, base);
     }
     rows.push(Value::Array(row));
 }
@@ -695,6 +664,45 @@ rows = [["state_icon", "agent"]]
         assert!(updated.contains("$quota_5h_warning"));
         assert!(updated.contains("$quota_week_danger"));
         assert_eq!(add_quota_row(&updated).unwrap(), updated);
+    }
+
+    #[test]
+    fn context_row_can_fold_weekly_without_placing_five_hour_beside_it() {
+        let updated =
+            add_quota_row("[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\"]]\n").unwrap();
+        let document = updated.parse::<DocumentMut>().unwrap();
+        let rows = document["ui"]["sidebar"]["agents"]["rows"]
+            .as_array()
+            .unwrap();
+        let context_row = rows
+            .iter()
+            .find(|row| {
+                row.as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| configured_token_name(item) == Some("$quota_context"))
+                })
+            })
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(context_row
+            .iter()
+            .any(|item| configured_token_name(item) == Some("$quota_week_inline_normal")));
+        assert!(context_row
+            .iter()
+            .all(|item| configured_token_name(item) != Some("$quota_5h_normal")));
+        assert!(rows.iter().any(|row| {
+            let items = row.as_array().unwrap();
+            items
+                .iter()
+                .any(|item| configured_token_name(item) == Some("$quota_5h_normal"))
+                && items
+                    .iter()
+                    .any(|item| configured_token_name(item) == Some("$quota_week_normal"))
+                && items
+                    .iter()
+                    .all(|item| configured_token_name(item) != Some("$quota_context"))
+        }));
     }
 
     #[test]

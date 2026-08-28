@@ -7,7 +7,7 @@ use std::process::Command;
 
 const METADATA_TTL_MS: &str = "86400000";
 const MAX_METADATA_TOKENS: usize = 16;
-const METADATA_TOKEN_NAMES: [&str; 18] = [
+const METADATA_TOKEN_NAMES: [&str; 21] = [
     "quota_state",
     "quota_provider",
     "quota_model",
@@ -24,6 +24,9 @@ const METADATA_TOKEN_NAMES: [&str; 18] = [
     "quota_week_normal",
     "quota_week_warning",
     "quota_week_danger",
+    "quota_week_inline_normal",
+    "quota_week_inline_warning",
+    "quota_week_inline_danger",
     "quota_topic",
     "quota_error",
 ];
@@ -371,7 +374,7 @@ fn desired_tokens(values: &MetadataTokens, topic: &str) -> BTreeMap<String, Stri
     insert_optional_token(&mut tokens, "quota_week", &values.quota_week);
     insert_severity_token(
         &mut tokens,
-        "quota_week",
+        week_style_base(&values.quota_5h),
         &values.quota_week,
         values.quota_week_severity,
     );
@@ -443,16 +446,21 @@ fn metadata_report_names(
     }
     while names.len() > active_capacity {
         let Some(index) = names.iter().position(|name| {
-            !matches!(
-                *name,
-                "quota_context"
-                    | "quota_model"
-                    | "quota_provider_model"
-                    | "quota_cache"
-                    | "quota_cache_ttl"
-                    | "quota_provider"
-                    | "quota_topic"
-            )
+            let must_clear = pane.tokens.contains_key(*name) && !desired.contains_key(*name);
+            !must_clear
+                && !matches!(
+                    *name,
+                    "quota_context"
+                        | "quota_model"
+                        | "quota_provider_model"
+                        | "quota_cache"
+                        | "quota_cache_ttl"
+                        | "quota_provider"
+                        | "quota_topic"
+                        | "quota_week_inline_normal"
+                        | "quota_week_inline_warning"
+                        | "quota_week_inline_danger"
+                )
         }) else {
             break;
         };
@@ -461,6 +469,16 @@ fn metadata_report_names(
     names.truncate(active_capacity);
     names.extend(cleanup_names);
     names
+}
+
+fn week_style_base(quota_5h: &str) -> &'static str {
+    // Empty 5h publishes week beside context (`context · 7d`). A present 5h
+    // keeps week on the limits row so 5h never shares a line with context.
+    if quota_5h.trim().is_empty() {
+        "quota_week_inline"
+    } else {
+        "quota_week"
+    }
 }
 
 fn insert_severity_token(
@@ -654,6 +672,48 @@ mod tests {
     }
 
     #[test]
+    fn weekly_only_inline_week_stays_inside_herdr_metadata_cap() {
+        let snapshot = crate::model::ProviderSnapshot::new(
+            Provider::Grok,
+            vec![crate::model::UsageWindow::new(
+                crate::model::WindowKind::Weekly,
+                30.0,
+                Some(crate::model::ResetAt::from_unix_seconds(183_600)),
+            )
+            .unwrap()],
+            0,
+        )
+        .with_context(Some(
+            crate::model::ContextUsage::new(42.0)
+                .unwrap()
+                .with_cache(Some(
+                    crate::model::CacheUsage::from_token_counts(100, 800, 100)
+                        .unwrap()
+                        .with_ttl_estimate(3_600, 0)
+                        .with_session_totals(
+                            crate::model::CacheTotals::from_token_counts(100, 800, 100),
+                            "session-1",
+                            1,
+                        ),
+                )),
+        ));
+        let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
+        let pane = AgentPane {
+            pane_id: "w1:p1".to_string(),
+            provider: Provider::Grok,
+            session_id: None,
+            session_summary: String::new(),
+            topic: String::new(),
+            tokens: BTreeMap::new(),
+        };
+        let names = metadata_report_names(&pane, &desired);
+        assert!(names.len() <= MAX_METADATA_TOKENS);
+        assert!(names.contains(&"quota_week_inline_normal"));
+        assert!(!names.contains(&"quota_week_normal"));
+        assert!(!names.contains(&"quota_5h"));
+    }
+
+    #[test]
     fn cache_diagnostics_stay_inside_herdr_metadata_cap() {
         let snapshot = crate::model::ProviderSnapshot::new(
             Provider::Claude,
@@ -793,6 +853,143 @@ mod tests {
         let mut panes = Vec::new();
         collect_agent_panes(&value, &mut panes);
         assert_eq!(panes[0].topic, "");
+    }
+
+    #[test]
+    fn claude_placeholder_five_hour_does_not_fold_week_onto_context() {
+        let snapshot = crate::model::ProviderSnapshot::new(
+            Provider::Claude,
+            vec![crate::model::UsageWindow::new(
+                crate::model::WindowKind::Weekly,
+                31.0,
+                Some(crate::model::ResetAt::from_unix_seconds(183_600)),
+            )
+            .unwrap()],
+            0,
+        );
+        let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
+        assert_eq!(desired.get("quota_5h").map(String::as_str), Some("5h N/A"));
+        assert!(desired.contains_key("quota_week_normal"));
+        assert!(!desired.contains_key("quota_week_inline_normal"));
+        assert!(!desired.contains_key("quota_week_inline_warning"));
+        assert!(!desired.contains_key("quota_week_inline_danger"));
+    }
+
+    #[test]
+    fn empty_five_hour_publishes_week_beside_context() {
+        let snapshot = crate::model::ProviderSnapshot::new(
+            Provider::Codex,
+            vec![crate::model::UsageWindow::new(
+                crate::model::WindowKind::Weekly,
+                31.0,
+                Some(crate::model::ResetAt::from_unix_seconds(183_600)),
+            )
+            .unwrap()],
+            0,
+        );
+        let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
+        assert!(!desired.contains_key("quota_5h"));
+        assert!(desired.contains_key("quota_week"));
+        assert!(desired.contains_key("quota_week_inline_normal"));
+        assert!(!desired.contains_key("quota_week_normal"));
+    }
+
+    #[test]
+    fn present_five_hour_keeps_week_off_the_context_row() {
+        let snapshot = crate::model::ProviderSnapshot::new(
+            Provider::Codex,
+            vec![
+                crate::model::UsageWindow::new(
+                    crate::model::WindowKind::FiveHour,
+                    5.0,
+                    Some(crate::model::ResetAt::from_unix_seconds(14_820)),
+                )
+                .unwrap(),
+                crate::model::UsageWindow::new(
+                    crate::model::WindowKind::Weekly,
+                    1.0,
+                    Some(crate::model::ResetAt::from_unix_seconds(183_600)),
+                )
+                .unwrap(),
+            ],
+            0,
+        );
+        let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
+        assert!(desired.contains_key("quota_5h"));
+        assert!(desired.contains_key("quota_week_normal"));
+        assert!(!desired.contains_key("quota_week_inline_normal"));
+        assert!(!desired.contains_key("quota_week_inline_warning"));
+        assert!(!desired.contains_key("quota_week_inline_danger"));
+    }
+
+    #[test]
+    fn folding_week_onto_context_clears_limits_week_styles() {
+        let snapshot = crate::model::ProviderSnapshot::new(
+            Provider::Grok,
+            vec![crate::model::UsageWindow::new(
+                crate::model::WindowKind::Weekly,
+                25.0,
+                Some(crate::model::ResetAt::from_unix_seconds(183_600)),
+            )
+            .unwrap()],
+            0,
+        );
+        let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
+        let mut tokens = desired.clone();
+        tokens.remove("quota_week_inline_normal");
+        tokens.insert("quota_week_normal".to_string(), "7d 75% 5d0h".to_string());
+        let pane = AgentPane {
+            pane_id: "w1:p1".to_string(),
+            provider: Provider::Grok,
+            session_id: None,
+            session_summary: String::new(),
+            topic: String::new(),
+            tokens,
+        };
+        assert!(!metadata_matches(&pane.tokens, &desired));
+        let names = metadata_report_names(&pane, &desired);
+        assert!(names.contains(&"quota_week_normal"));
+        assert!(names.contains(&"quota_week_inline_normal"));
+        assert!(!desired.contains_key("quota_week_normal"));
+        assert!(names.len() <= MAX_METADATA_TOKENS);
+    }
+
+    #[test]
+    fn switching_into_a_five_hour_window_clears_inline_week() {
+        let snapshot = crate::model::ProviderSnapshot::new(
+            Provider::Codex,
+            vec![
+                crate::model::UsageWindow::new(
+                    crate::model::WindowKind::FiveHour,
+                    5.0,
+                    Some(crate::model::ResetAt::from_unix_seconds(14_820)),
+                )
+                .unwrap(),
+                crate::model::UsageWindow::new(
+                    crate::model::WindowKind::Weekly,
+                    1.0,
+                    Some(crate::model::ResetAt::from_unix_seconds(183_600)),
+                )
+                .unwrap(),
+            ],
+            0,
+        );
+        let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
+        let mut tokens = desired.clone();
+        tokens.insert("quota_week_inline_normal".to_string(), "7d 99%".to_string());
+        let pane = AgentPane {
+            pane_id: "w1:p1".to_string(),
+            provider: Provider::Codex,
+            session_id: None,
+            session_summary: String::new(),
+            topic: String::new(),
+            tokens,
+        };
+        assert!(!metadata_matches(&pane.tokens, &desired));
+        let names = metadata_report_names(&pane, &desired);
+        assert!(names.contains(&"quota_week_inline_normal"));
+        assert!(names.contains(&"quota_week_normal"));
+        assert!(names.len() <= MAX_METADATA_TOKENS);
     }
 
     #[test]

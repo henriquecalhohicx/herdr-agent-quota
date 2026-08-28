@@ -158,7 +158,7 @@ fn sidebar_window(snapshot: &ProviderSnapshot, kind: WindowKind, now_unix: u64) 
 }
 
 fn missing_five_hour_label(provider: Provider) -> Option<&'static str> {
-    // Codex matches Grok: omit the 5h token so Herdr splices 7d onto context.
+    // Codex matches Grok: omit the 5h token so week can fold onto context.
     // Claude/Agy keep a visible placeholder on their separate limits row.
     match provider {
         Provider::Claude | Provider::Agy => Some("5h N/A"),

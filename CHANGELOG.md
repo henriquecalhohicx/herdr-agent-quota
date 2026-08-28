@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Rebuilding the plugin no longer leaves a stale active-turn watcher that
+  keeps publishing the old weekly token. That leftover `$quota_week_normal`
+  stacked on `$quota_week_inline_*` and made Grok show `7d` twice.
+
 ### Changed
 
 - Sidebar cards now decide from the 5h token, not the provider name, whether

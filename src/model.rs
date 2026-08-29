@@ -3,6 +3,12 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+/// Original-four quota collector (the subscription billed for a pane).
+///
+/// Distinct from [`Harness`], the Herdr agent drawing the pane. A Herdr agent
+/// name is not itself a collector: parse it as a harness first, then take
+/// [`Harness::billing`]. Cache filenames and the `provider` serde tag stay
+/// 1:1 with 0.2 snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -10,9 +16,19 @@ pub enum Provider {
     Grok,
     Claude,
     Agy,
+    /// OpenCode's Go subscription. Deliberately absent from [`Provider::ALL`]:
+    /// it has no 1:1 harness mapping and is only ever fetched for a pane that
+    /// resolved to it, so the original four keep their exact refresh behavior.
+    OpenCodeGo,
 }
 
+/// Quota collector identity. The original four keep the historical
+/// [`Provider`] name so 0.2 cache files and CLI flags stay compatible.
+pub type Billing = Provider;
+
 impl Provider {
+    /// The collectors a bare `--provider all` refreshes. OpenCode Go is not
+    /// here on purpose; see the variant's note.
     pub const ALL: [Self; 4] = [Self::Codex, Self::Grok, Self::Claude, Self::Agy];
 
     pub fn badge(self) -> &'static str {
@@ -21,6 +37,7 @@ impl Provider {
             Self::Grok => "[X]",
             Self::Claude => "[A]",
             Self::Agy => "[G]",
+            Self::OpenCodeGo => "[O]",
         }
     }
 
@@ -32,6 +49,7 @@ impl Provider {
             Self::Grok => "✕G",
             Self::Claude => "✦Cl",
             Self::Agy => "△Ag",
+            Self::OpenCodeGo => "◇Go",
         }
     }
 
@@ -41,6 +59,7 @@ impl Provider {
             Self::Grok => "Grok",
             Self::Claude => "Claude",
             Self::Agy => "Agy",
+            Self::OpenCodeGo => "OpenCode Go",
         }
     }
 
@@ -50,6 +69,9 @@ impl Provider {
             Self::Grok => "grok-cli-billing",
             Self::Claude => "claude-statusline",
             Self::Agy => "agy-statusline",
+            // Scoped to the OpenCode credential store so it can never collide
+            // with the original four's 0.2 filenames.
+            Self::OpenCodeGo => "opencode-go.opencode-store",
         }
     }
 
@@ -62,17 +84,127 @@ impl Provider {
     }
 }
 
+/// The agent drawing a Herdr pane. Distinct from [`Billing`]: OpenCode, Pi,
+/// OMP, and Kimi are harnesses in this release's identity split, but they do
+/// not yet select a quota collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Harness {
+    Codex,
+    Grok,
+    Claude,
+    Agy,
+    OpenCode,
+    Pi,
+    Omp,
+    Kimi,
+}
+
+impl Harness {
+    /// Classify a Herdr `agent` field. Unknown names are `None`, not a
+    /// collector fallback.
+    pub fn from_agent_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "codex" => Some(Self::Codex),
+            "grok" => Some(Self::Grok),
+            "claude" | "claude-code" | "anthropic" => Some(Self::Claude),
+            "agy" | "antigravity" | "antigravity-cli" => Some(Self::Agy),
+            "opencode" => Some(Self::OpenCode),
+            "pi" => Some(Self::Pi),
+            "omp" => Some(Self::Omp),
+            "kimi" => Some(Self::Kimi),
+            _ => None,
+        }
+    }
+
+    /// Original-four 1:1 map. Named harnesses without a collector, and
+    /// unknown names, return `None`.
+    pub fn billing(self) -> Option<Billing> {
+        match self {
+            Self::Codex => Some(Provider::Codex),
+            Self::Grok => Some(Provider::Grok),
+            Self::Claude => Some(Provider::Claude),
+            Self::Agy => Some(Provider::Agy),
+            Self::OpenCode | Self::Pi | Self::Omp | Self::Kimi => None,
+        }
+    }
+
+    pub fn billing_for_agent(name: &str) -> Option<Billing> {
+        Self::from_agent_name(name).and_then(Self::billing)
+    }
+}
+
+/// Opaque local identity for a credential store. Not a token, path, or account id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CredentialScope(&'static str);
+
+impl CredentialScope {
+    /// Canonical CLI stores for the original four collectors.
+    pub const CANONICAL: Self = Self("canonical");
+    /// OpenCode default data store (`$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`).
+    pub const OPENCODE_STORE: Self = Self("opencode-store");
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+/// Subscription paying for a pane, scoped to one credential store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BillingTarget {
+    pub billing: Provider,
+    pub credential_scope: CredentialScope,
+}
+
+impl BillingTarget {
+    pub fn original_four(provider: Provider) -> Self {
+        Self {
+            billing: provider,
+            credential_scope: CredentialScope::CANONICAL,
+        }
+    }
+
+    pub fn opencode_go() -> Self {
+        Self {
+            billing: Provider::OpenCodeGo,
+            credential_scope: CredentialScope::OPENCODE_STORE,
+        }
+    }
+
+    /// The billing identity when it is one of the original four collectors.
+    ///
+    /// Those are refreshed through the provider list; anything else is fetched
+    /// only for the pane that resolved to it.
+    pub fn original_provider(self) -> Option<Provider> {
+        Provider::ALL
+            .contains(&self.billing)
+            .then_some(self.billing)
+    }
+
+    /// Cache, lease, and refresh-marker filename stem.
+    ///
+    /// One authority for every target: the original four keep their 0.2 source
+    /// ids, and a scoped target carries its credential scope in the stem so it
+    /// cannot collide with them.
+    pub fn cache_identity(self) -> String {
+        self.billing.source().to_string()
+    }
+}
+
+/// Result of attributing a pane to a subscription. Uncertain evidence never
+/// guesses from the number of credentials on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    Subscription(BillingTarget),
+    NoSubscription,
+    Indeterminate,
+}
+
 impl std::str::FromStr for Provider {
     type Err = ModelError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "codex" => Ok(Self::Codex),
-            "grok" => Ok(Self::Grok),
-            "claude" | "claude-code" | "anthropic" => Ok(Self::Claude),
-            "agy" | "antigravity" | "antigravity-cli" => Ok(Self::Agy),
-            other => Err(ModelError::UnknownProvider(other.to_string())),
-        }
+        Harness::billing_for_agent(value)
+            .ok_or_else(|| ModelError::UnknownProvider(value.trim().to_ascii_lowercase()))
     }
 }
 
@@ -81,6 +213,9 @@ impl std::str::FromStr for Provider {
 pub enum WindowKind {
     FiveHour,
     Weekly,
+    /// Cached and rendered in the dashboard only. The sidebar has no monthly
+    /// token, and a 30d value must never be published through a weekly one.
+    Monthly,
 }
 
 impl WindowKind {
@@ -88,6 +223,7 @@ impl WindowKind {
         match self {
             Self::FiveHour => "5h",
             Self::Weekly => "7d",
+            Self::Monthly => "30d",
         }
     }
 
@@ -95,6 +231,7 @@ impl WindowKind {
         match self {
             Self::FiveHour => 5 * 60 * 60,
             Self::Weekly => 7 * 24 * 60 * 60,
+            Self::Monthly => 30 * 24 * 60 * 60,
         }
     }
 }
@@ -507,7 +644,7 @@ impl ProviderSnapshot {
     ) -> Severity {
         let relevant = match provider {
             Provider::Grok => window_in(windows, WindowKind::Weekly),
-            Provider::Codex | Provider::Claude | Provider::Agy => {
+            Provider::Codex | Provider::Claude | Provider::Agy | Provider::OpenCodeGo => {
                 window_in(windows, WindowKind::FiveHour)
                     .or_else(|| window_in(windows, WindowKind::Weekly))
             }
@@ -839,6 +976,81 @@ mod tests {
         assert!(Provider::Codex.exposes_five_hour_quota());
         assert!(Provider::Claude.exposes_five_hour_quota());
         assert!(!Provider::Grok.exposes_five_hour_quota());
+        assert!("opencode".parse::<Provider>().is_err());
+        assert!("OpenCode".parse::<Provider>().is_err());
+        assert!("pi".parse::<Provider>().is_err());
+    }
+
+    #[test]
+    fn opencode_go_cache_identity_cannot_borrow_original_four_files() {
+        let target = BillingTarget::opencode_go();
+        assert_eq!(target.cache_identity(), "opencode-go.opencode-store");
+        assert_eq!(target.credential_scope, CredentialScope::OPENCODE_STORE);
+        assert!(target.original_provider().is_none());
+        for provider in Provider::ALL {
+            let original = BillingTarget::original_four(provider);
+            assert_eq!(original.cache_identity(), provider.source());
+            assert_eq!(original.credential_scope, CredentialScope::CANONICAL);
+            assert_ne!(target.cache_identity(), original.cache_identity());
+            assert!(!target.cache_identity().contains(provider.source()));
+        }
+    }
+
+    #[test]
+    fn harness_identity_is_not_a_quota_collector() {
+        assert_eq!(
+            Harness::from_agent_name("OpenCode"),
+            Some(Harness::OpenCode)
+        );
+        assert_eq!(
+            Harness::from_agent_name("opencode"),
+            Some(Harness::OpenCode)
+        );
+        assert_eq!(Harness::billing_for_agent("opencode"), None);
+        assert_eq!(Harness::billing_for_agent("pi"), None);
+        assert_eq!(Harness::billing_for_agent("cursor"), None);
+        assert_eq!(
+            Harness::billing_for_agent("claude-code"),
+            Some(Provider::Claude)
+        );
+        assert_eq!(
+            Harness::billing_for_agent("antigravity"),
+            Some(Provider::Agy)
+        );
+        assert_eq!(Harness::billing_for_agent("codex"), Some(Provider::Codex));
+        assert_eq!(Harness::billing_for_agent("grok"), Some(Provider::Grok));
+    }
+
+    #[test]
+    fn original_four_v0_2_snapshots_deserialize_with_canonical_sources() {
+        let cases = [
+            (
+                r#"{"provider":"codex","source":"codex-app-server","fetched_at_unix":1,"windows":[]}"#,
+                Provider::Codex,
+                "codex-app-server",
+            ),
+            (
+                r#"{"provider":"grok","source":"grok-cli-billing","fetched_at_unix":1,"windows":[]}"#,
+                Provider::Grok,
+                "grok-cli-billing",
+            ),
+            (
+                r#"{"provider":"claude","source":"claude-statusline","fetched_at_unix":1,"windows":[]}"#,
+                Provider::Claude,
+                "claude-statusline",
+            ),
+            (
+                r#"{"provider":"agy","source":"agy-statusline","fetched_at_unix":1,"windows":[]}"#,
+                Provider::Agy,
+                "agy-statusline",
+            ),
+        ];
+        for (json, provider, source) in cases {
+            let snapshot: ProviderSnapshot = serde_json::from_str(json).unwrap();
+            assert_eq!(snapshot.provider, provider);
+            assert_eq!(snapshot.source, source);
+            assert_eq!(provider.source(), source);
+        }
     }
 
     fn quota_window(kind: WindowKind, used: f64, reset: u64) -> UsageWindow {

@@ -1,12 +1,14 @@
 use crate::cache::CacheStore;
 use crate::herdr::{
-    current_agent_provider, list_agent_panes, list_agent_state, publish_pane_tokens,
-    refresh_pane_topic, AgentPane, PaneTokens,
+    current_focused_pane, list_agent_panes, list_agent_state, plugin_quota_present,
+    publish_pane_tokens, refresh_pane_topic, AgentPane, PaneTokens,
 };
-use crate::model::{Provider, ProviderSnapshot};
+use crate::model::{BillingTarget, Harness, Provider, ProviderSnapshot, Resolution};
+use crate::opencode::OpenCodePaths;
 use crate::presentation::MetadataTokens;
 use crate::providers::statusline::enrich_cache_session;
-use crate::providers::{codex, grok};
+use crate::providers::{codex, grok, opencode_go};
+use crate::route;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -112,7 +114,8 @@ fn refresh_and_publish(
     panes: &[AgentPane],
 ) -> Result<()> {
     refresh_selected(cache, providers, force, panes)?;
-    publish(cache, providers, None, Some(panes))
+    let mut selected = panes_for_providers(panes, providers);
+    publish_resolved(cache, &mut selected, None)
 }
 
 fn run_internal(
@@ -128,7 +131,15 @@ fn run_internal(
     let panes = list_agent_panes().ok();
     let session_panes = panes.as_deref().unwrap_or_default();
     let outcomes = refresh_selected(&cache, providers, force, session_panes)?;
-    publish(&cache, providers, topic_pane, panes.as_deref())?;
+    // The all-provider pass (startup and the manual refresh action) is the only
+    // one that speaks for every pane, including harnesses with no legacy 1:1
+    // collector. A narrower `--provider` selection publishes only its own panes.
+    let mut publish_panes = if covers_every_collector(providers) {
+        session_panes.to_vec()
+    } else {
+        panes_for_providers(session_panes, providers)
+    };
+    publish_resolved(&cache, &mut publish_panes, topic_pane)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&outcomes)?);
     }
@@ -137,19 +148,29 @@ fn run_internal(
 
 pub fn event() -> Result<()> {
     let event = event_json();
-    let providers = event
-        .as_ref()
-        .and_then(find_agent)
-        .and_then(|agent| agent.parse::<Provider>().ok())
-        .map(|provider| vec![provider])
-        .unwrap_or_else(|| Provider::ALL.to_vec());
-    let topic_pane = event.as_ref().and_then(find_pane_id);
-    let status = event.as_ref().and_then(find_status);
-    // The detached watcher owns the final debounced pass. Keeping the event
-    // itself debounced avoids a duplicate Codex/Grok fetch when the agent
-    // emits its idle transition immediately after a tool hook.
-    let result = run_internal(&providers, false, false, topic_pane);
-    if status.is_some_and(is_working_status) {
+    let Some(event) = event.as_ref() else {
+        return Ok(());
+    };
+    let Some(agent) = find_agent(event) else {
+        return Ok(());
+    };
+    let Some(harness) = Harness::from_agent_name(agent) else {
+        return Ok(());
+    };
+    let Some(pane_id) = find_pane_id(event) else {
+        return Ok(());
+    };
+
+    let cache = CacheStore::from_env()?;
+    let Some(pane) = named_pane(pane_id, harness)? else {
+        return Ok(());
+    };
+
+    let status = find_status(event);
+    let result = handle_named_pane(&cache, pane, Some(pane_id));
+    // OpenCode (and other non-collector harnesses) must not start the
+    // original-four all-provider watch.
+    if status.is_some_and(is_working_status) && harness.billing().is_some() {
         if let Err(error) = spawn_watch() {
             if result.is_ok() {
                 return Err(error);
@@ -160,10 +181,84 @@ pub fn event() -> Result<()> {
 }
 
 pub fn focus() -> Result<()> {
-    let Some(provider) = current_agent_provider()? else {
+    let Some((pane_id, harness)) = current_focused_pane()? else {
         return Ok(());
     };
-    run(&[provider], false, false)
+    let cache = CacheStore::from_env()?;
+    let Some(pane) = named_pane(&pane_id, harness)? else {
+        return Ok(());
+    };
+    handle_named_pane(&cache, pane, None)
+}
+
+/// The single pane an entry point is allowed to act on.
+///
+/// It must still be in the one inventory read and still be running the harness
+/// that named it; a stale or mismatched pane id yields nothing, so the caller
+/// fetches nothing and writes no metadata to any sibling pane.
+fn named_pane(pane_id: &str, harness: Harness) -> Result<Option<AgentPane>> {
+    Ok(list_agent_state()?
+        .panes
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id && pane.harness == harness))
+}
+
+fn handle_named_pane(cache: &CacheStore, pane: AgentPane, topic_pane: Option<&str>) -> Result<()> {
+    let mut panes = [pane];
+    // A harness with no collector still resolves and publishes; it just has
+    // nothing to fetch first.
+    if let Some(provider) = panes[0].harness.billing() {
+        refresh_selected(cache, &[provider], false, &panes)?;
+    }
+    publish_resolved(cache, &mut panes, topic_pane)
+}
+
+/// Refresh a billing target that has no 1:1 harness collector.
+///
+/// Failure is deliberately silent: the pane keeps the last good snapshot for
+/// this same target rather than being cleared, and a missing key is a normal
+/// state (the user may not have a Go subscription) rather than an error worth
+/// surfacing on every event.
+fn refresh_scoped_target(cache: &CacheStore, target: &BillingTarget) {
+    let now = CacheStore::now_unix();
+    if should_skip_fetch(cache, target.billing, false, now).unwrap_or(true) {
+        return;
+    }
+    let Ok(Some(_lease)) = cache.try_lock_target_refresh(target) else {
+        return;
+    };
+    let Some(paths) = OpenCodePaths::from_env() else {
+        return;
+    };
+    let Some(key) = crate::opencode::go_key(&paths) else {
+        return;
+    };
+    // Marked before the request so a failing endpoint cannot be retried on
+    // every event; the debounce window applies to attempts, not successes.
+    if cache.mark_refresh(target.billing, now).is_err() {
+        return;
+    }
+    if let Ok(snapshot) = opencode_go::fetch(&key) {
+        let _ = cache.save(&snapshot);
+    }
+}
+
+fn covers_every_collector(providers: &[Provider]) -> bool {
+    Provider::ALL
+        .iter()
+        .all(|provider| providers.contains(provider))
+}
+
+fn panes_for_providers(panes: &[AgentPane], providers: &[Provider]) -> Vec<AgentPane> {
+    panes
+        .iter()
+        .filter(|pane| {
+            pane.harness
+                .billing()
+                .is_some_and(|billing| providers.contains(&billing))
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug)]
@@ -222,13 +317,18 @@ fn refresh_provider(
 
     let session_ids = panes
         .iter()
-        .filter(|pane| pane.provider == provider)
+        .filter(|pane| pane.harness.billing() == Some(provider))
         .filter_map(|pane| pane.session_id.clone())
         .collect::<Vec<_>>();
     let fetched = match provider {
         Provider::Codex => codex::fetch_for_sessions(&session_ids).map(FetchedSnapshot::direct),
         Provider::Grok => grok::fetch_for_sessions(&session_ids).map(FetchedSnapshot::direct),
         Provider::Claude | Provider::Agy => load_statusline_snapshot(cache, provider),
+        // OpenCode Go is fetched for a resolved pane, never through the
+        // provider list; see `fetch_opencode_go`.
+        Provider::OpenCodeGo => Err(anyhow::anyhow!(
+            "OpenCode Go is refreshed per resolved pane, not through --provider"
+        )),
     };
     cache.mark_refresh(provider, now)?;
     match fetched {
@@ -304,7 +404,7 @@ fn current_account_gate(provider: Provider) -> (Option<String>, Option<u64>) {
             (account_id, mtime)
         }
         Provider::Codex => (codex::current_account_id(), codex::auth_mtime_unix()),
-        Provider::Claude | Provider::Agy => (None, None),
+        Provider::Claude | Provider::Agy | Provider::OpenCodeGo => (None, None),
     }
 }
 
@@ -340,54 +440,77 @@ fn load_statusline_snapshot(cache: &CacheStore, provider: Provider) -> Result<Fe
     })
 }
 
-fn publish(
+fn publish_resolved(
     cache: &CacheStore,
-    providers: &[Provider],
+    panes: &mut [AgentPane],
     topic_pane: Option<&str>,
-    agent_panes: Option<&[AgentPane]>,
 ) -> Result<()> {
-    let mut panes = agent_panes.map_or_else(
-        || list_agent_panes().unwrap_or_default(),
-        |panes| panes.to_vec(),
-    );
-    if let Some(pane) = topic_pane.and_then(|pane_id| {
-        panes
-            .iter_mut()
-            .find(|pane| pane.pane_id == pane_id && providers.contains(&pane.provider))
-    }) {
+    if let Some(pane) =
+        topic_pane.and_then(|pane_id| panes.iter_mut().find(|pane| pane.pane_id == pane_id))
+    {
         refresh_pane_topic(pane);
     }
     let mut tokens = Vec::new();
     let now = CacheStore::now_unix();
-    for provider in providers {
-        let snapshot = cache.load(*provider)?;
-        let (account_id, mtime) = current_account_gate(*provider);
-        let usable = snapshot
-            .as_ref()
-            .filter(|snapshot| snapshot.usable_for_account(account_id.as_deref(), mtime));
-        for pane in panes.iter_mut().filter(|pane| pane.provider == *provider) {
-            if let Some(snapshot) = usable {
-                if let Some(session_id) = pane.session_id.as_deref() {
-                    if let Some(summary) = snapshot.session_summaries.get(session_id) {
-                        pane.session_summary = summary.clone();
+    for pane in panes.iter_mut() {
+        match route::resolve(pane) {
+            Resolution::Subscription(target) => {
+                if let Some(provider) = target.original_provider() {
+                    let snapshot = cache.load(provider)?;
+                    let (account_id, mtime) = current_account_gate(provider);
+                    let usable = snapshot.as_ref().filter(|snapshot| {
+                        snapshot.usable_for_account(account_id.as_deref(), mtime)
+                    });
+                    if let Some(snapshot) = usable {
+                        if let Some(session_id) = pane.session_id.as_deref() {
+                            if let Some(summary) = snapshot.session_summaries.get(session_id) {
+                                pane.session_summary = summary.clone();
+                            }
+                        }
+                    }
+                    if let Some(values) = tokens_for_loaded_snapshot(
+                        provider,
+                        snapshot.as_ref(),
+                        usable,
+                        now,
+                        pane.session_id.as_deref(),
+                    ) {
+                        tokens.push(PaneTokens {
+                            pane_id: pane.pane_id.clone(),
+                            values: Some(values),
+                        });
+                    }
+                } else {
+                    // Not one of the original four, so it is never fetched by
+                    // the provider list: this pane resolved to it, so this pane
+                    // pays for at most one debounced request.
+                    refresh_scoped_target(cache, &target);
+                    // A scoped target has no per-account gate to fail, so a
+                    // cached snapshot is simply usable; without one the pane
+                    // keeps whatever it already shows.
+                    let snapshot = cache.load(target.billing)?;
+                    if let Some(values) =
+                        tokens_for_provider(snapshot.as_ref(), now, pane.session_id.as_deref())
+                    {
+                        tokens.push(PaneTokens {
+                            pane_id: pane.pane_id.clone(),
+                            values: Some(values),
+                        });
                     }
                 }
             }
-            if let Some(values) = tokens_for_loaded_snapshot(
-                *provider,
-                snapshot.as_ref(),
-                usable,
-                now,
-                pane.session_id.as_deref(),
-            ) {
-                tokens.push(PaneTokens {
-                    pane_id: pane.pane_id.clone(),
-                    values,
-                });
+            Resolution::NoSubscription => {
+                if plugin_quota_present(&pane.tokens) {
+                    tokens.push(PaneTokens {
+                        pane_id: pane.pane_id.clone(),
+                        values: None,
+                    });
+                }
             }
+            Resolution::Indeterminate => {}
         }
     }
-    publish_pane_tokens(&panes, &tokens, CacheStore::now_millis())
+    publish_pane_tokens(panes, &tokens, CacheStore::now_millis())
 }
 
 fn event_json() -> Option<Value> {
@@ -581,6 +704,37 @@ mod tests {
     // Reading a pane repaints it, which visibly scrolls the agent's terminal.
     // An event must name exactly one pane to read, so the other panes of the
     // same provider are left alone.
+    #[test]
+    fn unknown_and_opencode_events_select_no_collectors() {
+        // `event` reads the agent name straight off the payload, so this is
+        // the exact chain that decides whether a watch may start.
+        fn collector(payload: &str) -> Option<Provider> {
+            let value: Value = serde_json::from_str(payload).unwrap();
+            let agent = find_agent(&value)?;
+            Harness::from_agent_name(agent)?.billing()
+        }
+
+        assert_eq!(
+            collector(
+                r#"{"event":"pane_agent_status_changed",
+                    "data":{"pane_id":"w1:p9","agent":"opencode","status":"working"}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            collector(r#"{"data":{"agent":"OpenCode","status":"working"}}"#),
+            None
+        );
+        assert_eq!(
+            collector(r#"{"data":{"agent":"cursor","status":"working"}}"#),
+            None
+        );
+        assert_eq!(
+            collector(r#"{"data":{"agent":"claude-code","pane_id":"w1:p1"}}"#),
+            Some(Provider::Claude)
+        );
+    }
+
     #[test]
     fn event_payload_names_the_single_pane_whose_topic_may_be_read() {
         let value: Value = serde_json::from_str(

@@ -116,6 +116,83 @@ HERDR_AGENT_QUOTA_WATCH_INTERVAL_SECONDS=300 \
   herdr plugin action invoke herdr-agent-quota.configure
 ```
 
+### 只安装你用到的 agent
+
+`configure` 默认安装全部支持的 agent。如果只用其中几个，直接点名即可，其余的什么都不会写：
+
+```sh
+herdr-agent-quota configure --apply --agent claude,codex
+```
+
+可选值为 `all`（默认）、`claude`、`codex`、`grok`、`agy`、`opencode`；可以重复传入
+或用逗号分隔。**没有被选中的 agent 不会得到侧栏行、不会被写入 statusLine、也不会生成
+hook 文件**——它在你机器上不留任何东西，自然也不会启动任何东西。
+
+卸载同理，卸掉一个不影响其余：
+
+```sh
+herdr-agent-quota configure --uninstall --agent grok   # 只卸 Grok
+herdr-agent-quota configure --uninstall                # 全部卸载
+```
+
+只有完整的 `--uninstall` 才会动共享状态：后台 watcher、已保存的轮询间隔，以及让侧栏
+改动可逆的配置备份。带 `--agent` 的卸载只移除该 agent 自己的行和文件，因此在其他
+agent 仍然安装时执行是安全的，重复执行也没有副作用。两种形式都只删除本插件写入的
+条目，你自己写的行或 hook 永远不会被碰。
+
+`--agent` 同样作用于 `--check`：只报告将要发生的变更，不写入任何文件。
+
+### OpenCode Go 属于尽力而为，欢迎协作者接手
+
+**本仓库维护者没有 OpenCode Go 订阅。** 其余每个 provider 都是对着真实账号做出来并
+验证过的，只有 OpenCode Go 做不到——它是本插件里唯一处于这种状态的部分。
+
+**一手验证过的：**
+
+- OpenCode 的本地存储：只读 `opencode.db` 的会话查询、`auth.json` 的凭据形状，以及
+  `opencode-go` 与 `opencode`（Zen）的区别，均对着真实的 opencode 1.18.20 实测。
+- `https://opencode.ai/zen/go/v1/usage` 确实存在，且对错误 token 返回 `401` 而非 `404`。
+
+**来自二手来源、未亲眼见过的：**
+
+- 成功响应的字段形状与 `percent` 的语义。取自
+  [CodexBar](https://github.com/steipete/CodexBar) 的实现及其自身测试用例，逐行引用
+  记录在 [`docs/research/opencode-go-usage.md`](docs/research/opencode-go-usage.md)。
+
+因此采集器一律 fail closed：字段缺失、格式错误或类型意外时**不产出窗口**而不是猜一个
+数；可选窗口缺失就省略，而不是报成 `0%`；`401`/`403` 永远不会变成 0% 读数。抓取失败
+时 pane 保留上一次的好值，而不是被清空。
+
+**这些都不会影响其他 provider。** OpenCode Go 刻意不在 `Provider::ALL` 里，所以
+`refresh --provider all`、活跃轮次 watcher 以及原有四家的缓存文件行为完全不变。它只会
+为「已归属到它」的那个 pane 触发，走自己独立的凭据作用域缓存和刷新 lease。不用
+OpenCode 就什么都不会跑；没有 Go key 就永远不会发出请求。两条都有测试覆盖。
+
+如果你有 Go 订阅，无论数字看着对不对，都欢迎提 issue 或 PR。一份脱敏的真实响应就能把
+现在的 fixture 换成实测数据。**这个 provider 非常欢迎有人共同维护。**
+
+### 前提：Herdr 自己的 agent integration
+
+额度是通过 Herdr 为 pane 报告的 session id 归属到具体订阅的，而 Herdr 只有在装了
+**它自己**的对应 agent integration 之后才知道这个 id。该 integration 编译在 `herdr`
+二进制内部，安装到 agent 各自的配置目录；本插件从不安装或修改它。
+
+查看当前状态：
+
+```sh
+herdr integration status
+```
+
+显示为 `not installed` 的 agent，Herdr 能识别其 pane 但拿不到 session，本插件因此
+无法归属，pane 就会一直是空的。按需安装：
+
+```sh
+herdr integration install opencode      # 装完重启该 agent 的 pane
+```
+
+`configure --check` 和 `configure --apply` 会为选中的、缺少 integration 的 agent
+打印这条提示，避免新装的用户遇到静默失灵。
+
 每轮只使用一个非阻塞 watcher lease 和一次 `herdr agent list`。各 provider 使用
 独立的非阻塞刷新 lease，慢 provider 不会阻塞其他 provider 或 statusLine 采集器。
 网络查询仍由原有刷新标记独立限制为每 60 秒最多一次，即使用户把轮询间隔设得更短也不会突破。

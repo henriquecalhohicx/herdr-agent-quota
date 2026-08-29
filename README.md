@@ -116,6 +116,99 @@ the same action from a shell with:
 herdr plugin action invoke herdr-agent-quota.refresh
 ```
 
+### Installing only the agents you use
+
+By default `configure` installs every supported agent. If you only use some of
+them, name them and nothing else is written:
+
+```sh
+herdr-agent-quota configure --apply --agent claude,codex
+```
+
+Accepted values are `all` (the default), `claude`, `codex`, `grok`, `agy` and
+`opencode`; repeat the flag or comma-separate the values. An agent you do not
+select gets no sidebar row, no statusLine entry and no hook file — nothing of
+that agent's is created or started on your machine.
+
+Removal works the same way, and removing one agent leaves the others working:
+
+```sh
+herdr-agent-quota configure --uninstall --agent grok   # just Grok
+herdr-agent-quota configure --uninstall                # everything
+```
+
+Only a full `--uninstall` touches shared state: the background watcher, the
+saved poll interval and the config backup that makes the sidebar changes
+reversible. A `--agent` uninstall removes just that agent's own rows and files,
+so it is safe to run while other agents stay installed, and it can be repeated
+without effect. Both forms only ever remove entries this plugin wrote; a row or
+hook you wrote yourself is left alone.
+
+`--agent` also narrows `--check`, which reports what would change without
+writing anything.
+
+### OpenCode Go is best-effort and looking for a maintainer
+
+**The maintainer of this repository does not have an OpenCode Go subscription.**
+Every other provider here was built and checked against a live account; OpenCode
+Go could not be, and it is the only part of this plugin in that position.
+
+What *is* verified first hand:
+
+- OpenCode's local storage: the read-only `opencode.db` session lookup, the
+  `auth.json` credential shapes, and the `opencode-go` vs `opencode` (Zen)
+  distinction, all checked against a real opencode 1.18.20 install.
+- That `https://opencode.ai/zen/go/v1/usage` exists and rejects a bad token with
+  `401` rather than `404`.
+
+What is taken from a second source rather than observed:
+
+- The success response shape and the meaning of its `percent` field. These come
+  from [CodexBar](https://github.com/steipete/CodexBar)'s implementation and its
+  own test fixtures, cited line by line in
+  [`docs/research/opencode-go-usage.md`](docs/research/opencode-go-usage.md).
+
+Because of that, the collector is written to fail closed: a missing, malformed
+or unexpected field produces no window instead of a guessed number, an absent
+optional window is omitted rather than reported as `0%`, and `401`/`403` never
+becomes a zero-percent reading. A pane keeps its last good value rather than
+being cleared when a fetch fails.
+
+**None of this can affect the other providers.** OpenCode Go is deliberately
+absent from `Provider::ALL`, so `refresh --provider all`, the active-turn
+watcher and the original four's cache files behave exactly as before. It is only
+ever fetched for a pane that resolved to it, through its own credential-scoped
+cache and refresh lease. If you do not use OpenCode, nothing here runs; if you
+do not have a Go key, no request is ever made. Both are covered by tests.
+
+If you have a Go subscription and the numbers look wrong — or right — please
+open an issue or a PR. A sanitized real response would let the fixtures be
+replaced with observed data, and help with this provider is very welcome.
+
+### Herdr's agent integration is a prerequisite
+
+Quota is attributed to a pane through the session id Herdr reports for it, and
+Herdr only knows that id once **its own** integration for that agent is
+installed. That integration ships inside the `herdr` binary and lives in the
+agent's config directory; this plugin never installs or modifies it.
+
+Check yours with:
+
+```sh
+herdr integration status
+```
+
+An agent listed as `not installed` is detected by Herdr but reports no session,
+so this plugin cannot attribute it and its pane simply stays blank. Install the
+one you need:
+
+```sh
+herdr integration install opencode      # then restart that agent's pane
+```
+
+`configure --check` and `configure --apply` print this hint for any selected
+agent whose integration is missing, so a fresh install does not fail silently.
+
 The Herdr plugin API does not currently let plugins add buttons to the native agent
 group header, so the shortcut is the closest stable one-step entry point.
 Selecting a pane also runs a provider-only refresh, debounced to once per

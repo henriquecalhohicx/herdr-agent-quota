@@ -1,13 +1,13 @@
 [package]
 name = "herdr-agent-quota"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.95"
 description = "Never hit a quota limit mid-task: live Claude, Codex, Grok and Agy usage in Herdr's agent sidebar"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/levi-qiao/herdr-agent-quota"
-homepage = "https://github.com/levi-qiao/herdr-agent-quota"
+homepage = "https://herdr.dev/plugins/"
 keywords = ["herdr", "claude-code", "codex", "quota", "usage"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["docs/screenshots/*", "docs/research/*", "docs/plans/*", ".github/*"]

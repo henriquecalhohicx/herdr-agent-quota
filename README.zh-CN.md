@@ -5,7 +5,7 @@ Claude Code、Codex、Grok 和 Agy/Antigravity 的订阅额度。
 
 [![CI](https://github.com/levi-qiao/herdr-agent-quota/actions/workflows/ci.yml/badge.svg)](https://github.com/levi-qiao/herdr-agent-quota/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Herdr plugin](https://img.shields.io/badge/Herdr-plugin-supported-5b6ee1)](https://herdr.dev/docs/plugins/)
+[![Herdr plugin](https://img.shields.io/badge/Herdr-plugin-supported-5b6ee1)](https://herdr.dev/plugins/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/levi-qiao/herdr-agent-quota?style=social)](https://github.com/levi-qiao/herdr-agent-quota)
 

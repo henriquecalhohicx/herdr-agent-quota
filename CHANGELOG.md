@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-29
+
 ### Fixed
 
 - Rebuilding the plugin no longer leaves a stale active-turn watcher that
@@ -218,5 +220,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A popup dashboard pane, event-driven refresh, and a local snapshot cache that
   survives provider failures.
 
-[Unreleased]: https://github.com/levi-qiao/herdr-agent-quota/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/levi-qiao/herdr-agent-quota/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/levi-qiao/herdr-agent-quota/releases/tag/v0.2.0
 [0.1.0]: https://github.com/levi-qiao/herdr-agent-quota/releases/tag/v0.1.0

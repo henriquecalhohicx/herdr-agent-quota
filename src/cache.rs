@@ -1,8 +1,9 @@
-use crate::model::{ContextUsage, Provider, ProviderSnapshot};
+use crate::model::{merge_omitted_window_list, ContextUsage, Provider, ProviderSnapshot};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -181,16 +182,6 @@ impl CacheStore {
                     .entry(session_id.clone())
                     .or_insert_with(|| context.clone());
             }
-            // Preserve every other session's last known quota windows. Each
-            // statusLine tick only reports the account signed in to the pane
-            // that fired it, so a concurrent second account's windows would
-            // otherwise be dropped the moment any other pane reports in.
-            for (session_id, windows) in &previous_snapshot.session_windows {
-                snapshot
-                    .session_windows
-                    .entry(session_id.clone())
-                    .or_insert_with(|| windows.clone());
-            }
         }
         if let Some(session_id) = session_id {
             if let Some(context) = snapshot.context.clone() {
@@ -198,10 +189,8 @@ impl CacheStore {
                     .session_contexts
                     .insert(session_id.to_string(), context);
             }
-            snapshot
-                .session_windows
-                .insert(session_id.to_string(), snapshot.windows.clone());
         }
+        merge_session_windows(&mut snapshot, previous_snapshot, session_id);
         let current_session_ids = session_id
             .map(|session_id| vec![session_id.to_string()])
             .unwrap_or_default();
@@ -262,9 +251,6 @@ impl CacheStore {
         // A malformed/temporarily unreadable old snapshot must not prevent a
         // fresh statusLine value from replacing it.
         let previous = self.load(snapshot.provider).ok().flatten();
-        if let Some(previous) = previous.as_ref() {
-            snapshot.merge_omitted_windows(previous);
-        }
         let previous_session_id = previous
             .as_ref()
             .and_then(|snapshot| snapshot.context.as_ref())
@@ -299,6 +285,7 @@ impl CacheStore {
                     .insert(session_id.to_string(), context);
             }
         }
+        merge_session_windows(&mut snapshot, previous.as_ref(), session_id);
         let current_session_ids = session_id
             .map(|session_id| vec![session_id.to_string()])
             .unwrap_or_default();
@@ -527,42 +514,57 @@ fn merge_session_models(
     }
 }
 
-fn prune_session_diagnostics(snapshot: &mut ProviderSnapshot, current_session_ids: &[String]) {
-    while snapshot.session_models.len() > MAX_STATUSLINE_SESSIONS {
-        let Some(session_id) = snapshot
-            .session_models
-            .keys()
-            .find(|session_id| {
-                !current_session_ids
-                    .iter()
-                    .any(|current| current == *session_id)
-            })
-            .cloned()
-            .or_else(|| snapshot.session_models.keys().next().cloned())
-        else {
-            break;
-        };
-        snapshot.session_models.remove(&session_id);
+fn merge_session_windows(
+    snapshot: &mut ProviderSnapshot,
+    previous: Option<&ProviderSnapshot>,
+    session_id: Option<&str>,
+) {
+    if let Some(previous) = previous {
+        for (session_id, windows) in &previous.session_windows {
+            snapshot
+                .session_windows
+                .entry(session_id.clone())
+                .or_insert_with(|| windows.clone());
+        }
+        match session_id {
+            Some(session_id) => {
+                let previous_windows = previous
+                    .session_windows
+                    .get(session_id)
+                    .map(Vec::as_slice)
+                    .or_else(|| {
+                        previous
+                            .session_windows
+                            .is_empty()
+                            .then_some(previous.windows.as_slice())
+                    });
+                if let Some(previous_windows) = previous_windows {
+                    merge_omitted_window_list(
+                        &mut snapshot.windows,
+                        previous_windows,
+                        snapshot.fetched_at_unix,
+                    );
+                }
+            }
+            None => snapshot.merge_omitted_windows(previous),
+        }
     }
-    while snapshot.session_contexts.len() > MAX_STATUSLINE_SESSIONS {
-        let Some(session_id) = snapshot
-            .session_contexts
-            .keys()
-            .find(|session_id| {
-                !current_session_ids
-                    .iter()
-                    .any(|current| current == *session_id)
-            })
-            .cloned()
-            .or_else(|| snapshot.session_contexts.keys().next().cloned())
-        else {
-            break;
-        };
-        snapshot.session_contexts.remove(&session_id);
-    }
-    while snapshot.session_windows.len() > MAX_STATUSLINE_SESSIONS {
-        let Some(session_id) = snapshot
+    if let Some(session_id) = session_id {
+        snapshot
             .session_windows
+            .insert(session_id.to_string(), snapshot.windows.clone());
+    }
+}
+
+fn prune_session_diagnostics(snapshot: &mut ProviderSnapshot, current_session_ids: &[String]) {
+    prune_session_map(&mut snapshot.session_models, current_session_ids);
+    prune_session_map(&mut snapshot.session_contexts, current_session_ids);
+    prune_session_map(&mut snapshot.session_windows, current_session_ids);
+}
+
+fn prune_session_map<T>(map: &mut BTreeMap<String, T>, current_session_ids: &[String]) {
+    while map.len() > MAX_STATUSLINE_SESSIONS {
+        let Some(session_id) = map
             .keys()
             .find(|session_id| {
                 !current_session_ids
@@ -570,11 +572,11 @@ fn prune_session_diagnostics(snapshot: &mut ProviderSnapshot, current_session_id
                     .any(|current| current == *session_id)
             })
             .cloned()
-            .or_else(|| snapshot.session_windows.keys().next().cloned())
+            .or_else(|| map.keys().next().cloned())
         else {
             break;
         };
-        snapshot.session_windows.remove(&session_id);
+        map.remove(&session_id);
     }
 }
 
@@ -731,6 +733,130 @@ mod tests {
             .snapshot;
         assert_eq!(saved.session_models["session-1"], "Sonnet");
         assert_eq!(saved.session_models["session-2"], "Opus");
+    }
+
+    #[test]
+    fn statusline_observations_keep_quota_windows_for_multiple_sessions() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(WindowKind::Weekly, 10.0, None).unwrap()],
+                    1,
+                ),
+                &json!({"session_id": "work"}),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(WindowKind::Weekly, 90.0, None).unwrap()],
+                    2,
+                ),
+                &json!({"session_id": "personal"}),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            saved.windows_for_session(Some("work"))[0].used_percent,
+            10.0
+        );
+        assert_eq!(
+            saved.windows_for_session(Some("personal"))[0].used_percent,
+            90.0
+        );
+        assert!(saved.windows_for_session(Some("unknown")).is_empty());
+    }
+
+    #[test]
+    fn statusline_omitted_five_hour_window_stays_on_the_same_session() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![
+                        UsageWindow::new(
+                            WindowKind::FiveHour,
+                            22.0,
+                            Some(ResetAt::from_unix_seconds(2_000)),
+                        )
+                        .unwrap(),
+                        UsageWindow::new(
+                            WindowKind::Weekly,
+                            65.0,
+                            Some(ResetAt::from_unix_seconds(10_000)),
+                        )
+                        .unwrap(),
+                    ],
+                    1_000,
+                ),
+                &json!({"session_id": "work"}),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::Weekly,
+                        90.0,
+                        Some(ResetAt::from_unix_seconds(10_000)),
+                    )
+                    .unwrap()],
+                    1_100,
+                ),
+                &json!({"session_id": "personal"}),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::Weekly,
+                        66.0,
+                        Some(ResetAt::from_unix_seconds(10_000)),
+                    )
+                    .unwrap()],
+                    1_200,
+                ),
+                &json!({"session_id": "work"}),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            saved
+                .windows_for_session(Some("work"))
+                .iter()
+                .find(|window| window.kind == WindowKind::FiveHour)
+                .unwrap()
+                .used_percent,
+            22.0
+        );
+        assert!(saved
+            .windows_for_session(Some("personal"))
+            .iter()
+            .all(|window| window.kind != WindowKind::FiveHour));
     }
 
     #[test]
@@ -994,6 +1120,7 @@ mod tests {
             .snapshot;
         assert_eq!(saved.session_models.len(), MAX_STATUSLINE_SESSIONS);
         assert_eq!(saved.session_contexts.len(), MAX_STATUSLINE_SESSIONS);
+        assert_eq!(saved.session_windows.len(), MAX_STATUSLINE_SESSIONS);
         assert!(saved
             .session_models
             .contains_key(&format!("session-{}", MAX_STATUSLINE_SESSIONS + 7)));
@@ -1049,6 +1176,15 @@ mod tests {
             22.0
         );
         assert_eq!(saved.window(WindowKind::Weekly).unwrap().used_percent, 66.0);
+        assert_eq!(
+            saved
+                .windows_for_session(Some("session-1"))
+                .iter()
+                .find(|window| window.kind == WindowKind::FiveHour)
+                .unwrap()
+                .used_percent,
+            22.0
+        );
     }
 
     #[test]

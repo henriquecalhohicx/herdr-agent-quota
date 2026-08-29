@@ -1,5 +1,6 @@
 use crate::model::{
-    format_percent, Provider, ProviderSnapshot, ResetAt, Severity, UsageWindow, WindowKind,
+    format_percent, window_in, Provider, ProviderSnapshot, ResetAt, Severity, UsageWindow,
+    WindowKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,10 +46,9 @@ impl MetadataTokens {
     /// is still useful for the identity row, but context/cache values are
     /// session data and must stay blank until their session id is known.
     ///
-    /// Quota windows are also resolved per session rather than from the
-    /// shared top-level snapshot: StatusLine providers (Claude, Agy) can have
-    /// more than one signed-in account reporting concurrently, and the
-    /// top-level windows only ever hold whichever account reported last.
+    /// Quota windows follow the same session lookup as model/context, except
+    /// they fall back to the account-level snapshot when no session has
+    /// reported windows (Grok/Codex, or a legacy StatusLine cache).
     pub fn from_snapshot_for_pane(
         snapshot: &ProviderSnapshot,
         now_unix: u64,
@@ -128,11 +128,7 @@ fn provider_model_label(provider: &str, model: &str) -> String {
 }
 
 fn window_severity(windows: &[UsageWindow], kind: WindowKind, now_unix: u64) -> Option<Severity> {
-    find_window(windows, kind).map(|window| Severity::for_window(window, now_unix))
-}
-
-fn find_window(windows: &[UsageWindow], kind: WindowKind) -> Option<&UsageWindow> {
-    windows.iter().find(|window| window.kind == kind)
+    window_in(windows, kind).map(|window| Severity::for_window(window, now_unix))
 }
 
 pub fn sidebar_summary(snapshot: &ProviderSnapshot, now_unix: u64) -> String {
@@ -146,7 +142,7 @@ pub fn dashboard_summary(snapshot: &ProviderSnapshot, now_unix: u64) -> String {
 fn summary_from_windows(windows: &[UsageWindow], now_unix: u64, include_left: bool) -> String {
     [WindowKind::FiveHour, WindowKind::Weekly]
         .into_iter()
-        .filter_map(|kind| find_window(windows, kind))
+        .filter_map(|kind| window_in(windows, kind))
         .map(|window| format_window(window, now_unix, include_left))
         .collect::<Vec<_>>()
         .join(" · ")
@@ -158,7 +154,7 @@ fn sidebar_window(
     kind: WindowKind,
     now_unix: u64,
 ) -> String {
-    if let Some(window) = find_window(windows, kind) {
+    if let Some(window) = window_in(windows, kind) {
         return format_compact_window(window, now_unix);
     }
     if kind == WindowKind::FiveHour {
@@ -545,6 +541,65 @@ mod tests {
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
         assert_eq!(values.quota_5h, "");
         assert_eq!(values.quota_5h_severity, None);
+    }
+
+    #[test]
+    fn grok_and_codex_panes_keep_account_quota_when_the_session_is_known() {
+        let grok = ProviderSnapshot::new(
+            Provider::Grok,
+            vec![window(WindowKind::Weekly, 31.0, 518_400)],
+            0,
+        );
+        let grok_pane = MetadataTokens::from_snapshot_for_pane(&grok, 0, Some("session-1"));
+        assert_eq!(grok_pane.quota_week, "7d 69% 6d0h");
+        assert_eq!(grok_pane.quota_5h, "");
+
+        let codex = ProviderSnapshot::new(
+            Provider::Codex,
+            vec![
+                window(WindowKind::FiveHour, 40.0, 14_820),
+                window(WindowKind::Weekly, 31.0, 518_400),
+            ],
+            0,
+        );
+        let codex_pane = MetadataTokens::from_snapshot_for_pane(&codex, 0, Some("session-1"));
+        assert_eq!(codex_pane.quota_5h, "5h 60% 4h07m");
+        assert_eq!(codex_pane.quota_week, "7d 69% 6d0h");
+    }
+
+    #[test]
+    fn claude_pane_quota_follows_the_pane_session() {
+        let mut snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![window(WindowKind::Weekly, 90.0, 518_400)],
+            0,
+        );
+        snapshot.session_windows.insert(
+            "work".to_string(),
+            vec![
+                window(WindowKind::FiveHour, 18.0, 14_820),
+                window(WindowKind::Weekly, 10.0, 518_400),
+            ],
+        );
+        snapshot.session_windows.insert(
+            "personal".to_string(),
+            vec![
+                window(WindowKind::FiveHour, 82.0, 14_820),
+                window(WindowKind::Weekly, 90.0, 518_400),
+            ],
+        );
+
+        let work = MetadataTokens::from_snapshot_for_pane(&snapshot, 0, Some("work"));
+        assert_eq!(work.quota_5h, "5h 82% 4h07m");
+        assert_eq!(work.quota_week, "7d 90% 6d0h");
+
+        let personal = MetadataTokens::from_snapshot_for_pane(&snapshot, 0, Some("personal"));
+        assert_eq!(personal.quota_5h, "5h 18% 4h07m");
+        assert_eq!(personal.quota_week, "7d 10% 6d0h");
+
+        let unknown = MetadataTokens::from_snapshot_for_pane(&snapshot, 0, Some("other"));
+        assert_eq!(unknown.quota_5h, "5h N/A");
+        assert_eq!(unknown.quota_week, "");
     }
 
     #[test]

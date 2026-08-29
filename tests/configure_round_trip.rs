@@ -496,9 +496,8 @@ fn statusline_without_context_keeps_the_last_context_snapshot() {
 fn concurrent_claude_accounts_keep_their_own_quota_windows() {
     // Two Claude panes signed in to different accounts (for example a work
     // and a personal login in separate CLAUDE_CONFIG_DIR checkouts) each send
-    // their own statusLine ticks. Before session-scoped windows, the second
-    // account's tick clobbered a single provider-wide snapshot, so both panes
-    // showed whichever account reported most recently.
+    // their own statusLine ticks. Sidebar percentages are remaining, not used:
+    // work 18%/10% used → 82%/90% remaining; personal 82%/90% used → 18%/10%.
     let state = tempdir().unwrap();
     let (herdr_stub, herdr_log) = install_herdr_stub(
         state.path(),
@@ -540,10 +539,16 @@ fn concurrent_claude_accounts_keep_their_own_quota_windows() {
         .lines()
         .find(|line| line.contains("w2:p1"))
         .expect("personal pane reported");
-    assert!(work_report.contains("quota_5h=5h 82%"));
-    assert!(work_report.contains("quota_week=7d 90%"));
-    assert!(personal_report.contains("quota_5h=5h 18%"));
-    assert!(personal_report.contains("quota_week=7d 10%"));
+    assert!(work_report.contains("quota_5h=5h 82%"), "{work_report}");
+    assert!(work_report.contains("quota_week=7d 90%"), "{work_report}");
+    assert!(
+        personal_report.contains("quota_5h=5h 18%"),
+        "{personal_report}"
+    );
+    assert!(
+        personal_report.contains("quota_week=7d 10%"),
+        "{personal_report}"
+    );
 }
 
 #[test]

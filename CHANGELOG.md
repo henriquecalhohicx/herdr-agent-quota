@@ -11,6 +11,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rebuilding the plugin no longer leaves a stale active-turn watcher that
   keeps publishing the old weekly token. That leftover `$quota_week_normal`
   stacked on `$quota_week_inline_*` and made Grok show `7d` twice.
+- Claude/Agy quota windows are remembered per statusLine session so a work
+  and a personal login no longer overwrite each other's 5h/7d rows. Grok and
+  Codex still publish the account-level windows to every pane of that login;
+  a Claude session that has not reported yet shows unavailable instead of
+  borrowing another account's numbers. Based on work by @joshfinnie in #30.
 
 ### Changed
 

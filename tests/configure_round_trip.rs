@@ -493,6 +493,65 @@ fn statusline_without_context_keeps_the_last_context_snapshot() {
 }
 
 #[test]
+fn concurrent_claude_accounts_keep_their_own_quota_windows() {
+    // Two Claude panes signed in to different accounts (for example a work
+    // and a personal login in separate CLAUDE_CONFIG_DIR checkouts) each send
+    // their own statusLine ticks. Sidebar percentages are remaining, not used:
+    // work 18%/10% used → 82%/90% remaining; personal 82%/90% used → 18%/10%.
+    let state = tempdir().unwrap();
+    let (herdr_stub, herdr_log) = install_herdr_stub(
+        state.path(),
+        r#"{"result":{"agents":[
+            {"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"work-session"}},
+            {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"personal-session"}}
+        ]}}"#,
+    );
+    run_claude_collector(
+        state.path(),
+        &herdr_stub,
+        br#"{
+            "session_id": "work-session",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 18.0},
+                "seven_day": {"used_percentage": 10.0}
+            }
+        }"#,
+    );
+    run_claude_collector(
+        state.path(),
+        &herdr_stub,
+        br#"{
+            "session_id": "personal-session",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 82.0},
+                "seven_day": {"used_percentage": 90.0}
+            }
+        }"#,
+    );
+
+    run_claude_refresh(state.path(), &herdr_stub);
+    let report = fs::read_to_string(herdr_log).unwrap();
+    let work_report = report
+        .lines()
+        .find(|line| line.contains("w1:p1"))
+        .expect("work pane reported");
+    let personal_report = report
+        .lines()
+        .find(|line| line.contains("w2:p1"))
+        .expect("personal pane reported");
+    assert!(work_report.contains("quota_5h=5h 82%"), "{work_report}");
+    assert!(work_report.contains("quota_week=7d 90%"), "{work_report}");
+    assert!(
+        personal_report.contains("quota_5h=5h 18%"),
+        "{personal_report}"
+    );
+    assert!(
+        personal_report.contains("quota_week=7d 10%"),
+        "{personal_report}"
+    );
+}
+
+#[test]
 fn quota_refresh_does_not_report_metadata_to_a_scrolled_pane() {
     let state = tempdir().unwrap();
     let log = state.path().join("herdr.log");

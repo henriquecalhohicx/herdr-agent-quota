@@ -355,6 +355,15 @@ pub struct ProviderSnapshot {
     /// pane's local rollout usage.
     #[serde(default)]
     pub session_contexts: BTreeMap<String, ContextUsage>,
+    /// Account quota windows keyed by the provider's session id.
+    ///
+    /// Quota itself is account-level for every provider. Grok and Codex fetch
+    /// one login's windows and leave this map empty. StatusLine providers
+    /// (Claude, Agy) can run two signed-in accounts into one cache file, and
+    /// the top-level `windows` field only holds whichever account ticked last;
+    /// those ticks are stored here so a pane can read its own account.
+    #[serde(default)]
+    pub session_windows: BTreeMap<String, Vec<UsageWindow>>,
     /// Login identity the snapshot was fetched for (Grok `user_id`, Codex
     /// `tokens.account_id`). Used to drop another account's cached quota after
     /// `grok login` / Codex account switch. Absent on snapshots written before
@@ -375,6 +384,7 @@ impl ProviderSnapshot {
             session_summaries: BTreeMap::new(),
             session_models: BTreeMap::new(),
             session_contexts: BTreeMap::new(),
+            session_windows: BTreeMap::new(),
             account_id: None,
         }
     }
@@ -415,6 +425,28 @@ impl ProviderSnapshot {
         None
     }
 
+    /// Return the quota windows for a pane's session.
+    ///
+    /// Context and model are session-local, so a known session never falls
+    /// back to the provider-level value. Quota is account-level: Grok and
+    /// Codex share one login's windows across every pane, and this map stays
+    /// empty for them. StatusLine providers fill the map; a known session
+    /// missing from a non-empty map must not borrow another account's
+    /// numbers. The top-level `windows` field is used when Herdr has no
+    /// session id, or when no session has reported windows yet (legacy cache).
+    pub fn windows_for_session(&self, session_id: Option<&str>) -> &[UsageWindow] {
+        let Some(session_id) = session_id else {
+            return &self.windows;
+        };
+        if let Some(windows) = self.session_windows.get(session_id) {
+            return windows;
+        }
+        if self.session_windows.is_empty() {
+            return &self.windows;
+        }
+        &[]
+    }
+
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
         self
@@ -443,7 +475,7 @@ impl ProviderSnapshot {
     }
 
     pub fn window(&self, kind: WindowKind) -> Option<&UsageWindow> {
-        self.windows.iter().find(|window| window.kind == kind)
+        window_in(&self.windows, kind)
     }
 
     /// Keep a previously observed quota window when the latest payload omits
@@ -455,42 +487,69 @@ impl ProviderSnapshot {
     /// snapshots has not itself reset. An empty `windows` list still means
     /// "rate limits were absent — clear stale quota".
     pub fn merge_omitted_windows(&mut self, previous: &Self) {
-        if self.windows.is_empty() {
-            return;
-        }
         if !same_quota_account(self, previous) {
             return;
         }
-        if sibling_quota_reset(self, previous) {
-            return;
-        }
-        for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
-            if self.window(kind).is_some() {
-                continue;
-            }
-            let Some(previous_window) = previous.window(kind).cloned() else {
-                continue;
-            };
-            let Some(reset) = previous_window.resets_at else {
-                continue;
-            };
-            if reset.unix_seconds() <= self.fetched_at_unix {
-                continue;
-            }
-            self.windows.push(previous_window);
-        }
+        merge_omitted_window_list(&mut self.windows, &previous.windows, self.fetched_at_unix);
     }
 
     pub fn severity(&self, now_unix: u64) -> Severity {
-        let relevant = match self.provider {
-            Provider::Grok => self.window(WindowKind::Weekly),
-            Provider::Codex | Provider::Claude | Provider::Agy => self
-                .window(WindowKind::FiveHour)
-                .or_else(|| self.window(WindowKind::Weekly)),
+        Self::severity_for_windows(self.provider, &self.windows, now_unix)
+    }
+
+    /// Same runway-health calculation as [`Self::severity`], but over an
+    /// explicit window slice so a pane can be scored against its own
+    /// session/account windows instead of the provider-wide top-level ones.
+    pub fn severity_for_windows(
+        provider: Provider,
+        windows: &[UsageWindow],
+        now_unix: u64,
+    ) -> Severity {
+        let relevant = match provider {
+            Provider::Grok => window_in(windows, WindowKind::Weekly),
+            Provider::Codex | Provider::Claude | Provider::Agy => {
+                window_in(windows, WindowKind::FiveHour)
+                    .or_else(|| window_in(windows, WindowKind::Weekly))
+            }
         };
         relevant
             .map(|window| Severity::for_window(window, now_unix))
             .unwrap_or(Severity::Unknown)
+    }
+}
+
+pub(crate) fn window_in(windows: &[UsageWindow], kind: WindowKind) -> Option<&UsageWindow> {
+    windows.iter().find(|window| window.kind == kind)
+}
+
+/// Restore an omitted 5h/weekly window from a previous observation of the
+/// *same* account or session. Callers that key windows by session must pass
+/// that session's previous list, not another account's top-level snapshot.
+pub(crate) fn merge_omitted_window_list(
+    windows: &mut Vec<UsageWindow>,
+    previous: &[UsageWindow],
+    fetched_at_unix: u64,
+) {
+    if windows.is_empty() {
+        return;
+    }
+    if sibling_quota_reset_in(windows, previous) {
+        return;
+    }
+    for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+        if window_in(windows, kind).is_some() {
+            continue;
+        }
+        let Some(previous_window) = window_in(previous, kind).cloned() else {
+            continue;
+        };
+        let Some(reset) = previous_window.resets_at else {
+            continue;
+        };
+        if reset.unix_seconds() <= fetched_at_unix {
+            continue;
+        }
+        windows.push(previous_window);
     }
 }
 
@@ -504,13 +563,13 @@ fn same_quota_account(current: &ProviderSnapshot, previous: &ProviderSnapshot) -
     }
 }
 
-fn sibling_quota_reset(current: &ProviderSnapshot, previous: &ProviderSnapshot) -> bool {
+fn sibling_quota_reset_in(current: &[UsageWindow], previous: &[UsageWindow]) -> bool {
     const USED_PERCENT_RESET_DROP: f64 = 5.0;
     [WindowKind::FiveHour, WindowKind::Weekly]
         .into_iter()
         .any(|kind| {
             let (Some(current_window), Some(previous_window)) =
-                (current.window(kind), previous.window(kind))
+                (window_in(current, kind), window_in(previous, kind))
             else {
                 return false;
             };
@@ -867,5 +926,72 @@ mod tests {
         );
         current.merge_omitted_windows(&previous);
         assert!(current.window(WindowKind::FiveHour).is_none());
+    }
+
+    #[test]
+    fn account_level_windows_are_shared_when_no_session_has_reported() {
+        let snapshot = ProviderSnapshot::new(
+            Provider::Grok,
+            vec![quota_window(WindowKind::Weekly, 31.0, 10_000)],
+            1,
+        );
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("session-1"))
+                .first()
+                .map(|window| window.used_percent),
+            Some(31.0)
+        );
+        assert_eq!(
+            snapshot
+                .windows_for_session(None)
+                .first()
+                .unwrap()
+                .used_percent,
+            31.0
+        );
+    }
+
+    #[test]
+    fn statusline_windows_do_not_leak_across_sessions() {
+        let mut snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![quota_window(WindowKind::Weekly, 90.0, 10_000)],
+            1,
+        );
+        snapshot.session_windows.insert(
+            "work".to_string(),
+            vec![quota_window(WindowKind::Weekly, 10.0, 10_000)],
+        );
+        snapshot.session_windows.insert(
+            "personal".to_string(),
+            vec![quota_window(WindowKind::Weekly, 90.0, 10_000)],
+        );
+
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("work"))
+                .first()
+                .unwrap()
+                .used_percent,
+            10.0
+        );
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("personal"))
+                .first()
+                .unwrap()
+                .used_percent,
+            90.0
+        );
+        assert!(snapshot.windows_for_session(Some("unknown")).is_empty());
+        assert_eq!(
+            snapshot
+                .windows_for_session(None)
+                .first()
+                .unwrap()
+                .used_percent,
+            90.0
+        );
     }
 }

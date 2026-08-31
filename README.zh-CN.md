@@ -83,6 +83,59 @@ herdr-agent-quota configure --apply --agent claude,codex,pi
 可选值：`all`、`claude`、`codex`、`grok`、`agy`、`opencode`、`pi`。
 安装器不会替换用户自己维护的侧栏 rows 或 statusLine hook。
 
+### 不重装也能改设置
+
+打开 **Agent quota settings** 插件 pane。安装参数能设的东西这里都能改，包括装哪些
+agent：
+
+```
+Agent quota settings
+====================
+  ─ Display ───
+>   Percentages     <   used    > how much quota is spent
+    Sidebar layout  <  packed   > cache·ttl and 5h·7d share a row
+    Row gap         <     1     > one blank row between panes
+    Watch interval  <    1m     > polled while an agent is working
+    Brand colors    <    on     > provider and model in agent hues
+    Agent order     <  default  > Herdr sorts the agent panel
+    Low quota alert <    off    > no notification
+  ─ Fields ───
+    [x] topic   [x] model   [x] cache   [x] ttl
+    [x] context [x] 5h      [x] 7d
+  ─ Agents ───
+    [x] claude  [x] codex   [x] grok    …
+
+  ↑↓ row  ←→/space value  a apply  q quit
+```
+
+`*` 表示改了还没应用。按 `a` 跑的就是 "Install / repair" 那条 `configure --apply`，
+然后 reload Herdr 配置，再强制刷新一次——新的行和行里的数字会一起立刻生效。
+
+取消勾选某个 agent 等于**卸载**它的 collector 并还原它自己的 statusLine，所以需要
+再按一次 `a` 确认。最后一个 agent 不能取消。
+
+Fields 是可选的额度字段。供应商名和 error token 永远显示：一行说不清自己属于哪个
+订阅、或者把"额度为什么读不到"藏起来，比不显示这行更糟。
+
+**Agent order** 选 `quota` 会把额度最少的 agent 排到 Herdr Agent 面板最上面。做法是
+交给 Herdr 一个声明式 agent view，按插件发布的隐藏 token `quota_headroom` 排序，所以
+排序依据就是侧边栏上能看到的那个数——5h 和 7d 里更紧的那个。Herdr 全局只保留一个这样
+的 view，打开它就会顶掉你自己的 `ui.agent_panel_sort`，改回 `default` 或者卸载插件都会
+把面板还回去。这个 view 不跨 Herdr 重启，插件的 startup 钩子会重新装上。
+
+**Low quota alert** 在某个供应商的剩余额度掉到所选百分比及以下时，按供应商通知一次。
+只要还低着就不再响，等额度回到阈值以上之后再掉下来才会再通知一次——窗口重置后重新用完
+会重新提醒。默认 `off`，不发任何通知。
+
+同样的选项也可以从命令行给：
+
+```sh
+./install.sh --fields topic,model,context,5h,7d
+./install.sh --brand-colors off
+./install.sh --agent-order quota --low-quota-alert 10
+herdr-agent-quota configure --apply --fields all --brand-colors on
+```
+
 手动刷新或卸载：
 
 ```sh
@@ -140,6 +193,10 @@ OpenCode 1.18.20 上验证；成功响应结构来自
   5h、7d 各占一行。两种布局下空 token 都会折叠。
 - token 全空的行会折叠。插件自有布局默认 `row_gap = 1`（pane 之间一行空白）。
   `--row-gap 0` 贴紧。Herdr 只接受整行；用户自己写的 `row_gap` 不会被改。
+- 除了供应商名和 error token，其他额度字段都能用 `--fields` 关掉；
+  `--brand-colors off` 去掉每个 agent 的品牌色，严重度颜色保留。
+- 百分比默认显示**剩余**额度。`--quota-percent used` 把 5h/7d/30d 的数字换成
+  **已用**额度；侧栏 token 宽度不变，颜色依然按剩余量计算，红色永远表示快用完。
 - provider/model、topic、cache/TTL、context 和限额只在有可靠数据时显示。
 - tab 用主文字色（`#eceef2`）。prompt 用正文色（`#c8cdd6`）。cache、TTL、
   context 用 metadata 灰（`#969eae`）。品牌色只给供应商；模型用同色系的
@@ -154,13 +211,15 @@ OpenCode 1.18.20 上验证；成功响应结构来自
 - 只有 token 真正变化时才写 metadata，并始终遵守 Herdr 的 16-token 上限。
 
 默认 watcher 间隔为 60 秒，安装时可调整。侧栏布局默认 `packed`，间距默认 `1`，
-选择会写入插件状态，之后的 **Install / repair** 会沿用：
+百分比默认 `remaining`，选择会写入插件状态，之后的 **Install / repair** 会沿用：
 
 ```sh
 ./install.sh --watch-interval-seconds 300
 ./install.sh --sidebar-layout stacked
 ./install.sh --row-gap 0
+./install.sh --quota-percent used
 herdr-agent-quota configure --apply --sidebar-layout packed --row-gap 1
+herdr-agent-quota configure --apply --quota-percent remaining
 ```
 
 ## 数据与隐私

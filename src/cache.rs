@@ -1,4 +1,6 @@
-use crate::cli::{SidebarLayout, SidebarRowGap};
+use crate::cli::{
+    AgentOrder, BrandColors, FieldSet, LowQuotaAlert, PercentStyle, SidebarLayout, SidebarRowGap,
+};
 use crate::model::{
     merge_omitted_window_list, BillingTarget, ContextUsage, Provider, ProviderSnapshot,
 };
@@ -18,6 +20,14 @@ const WATCH_INTERVAL_ENV: &str = "HERDR_AGENT_QUOTA_WATCH_INTERVAL_SECONDS";
 const WATCH_INTERVAL_FILE: &str = "watch-interval-seconds";
 const SIDEBAR_LAYOUT_FILE: &str = "sidebar-layout";
 const ROW_GAP_FILE: &str = "row-gap";
+const QUOTA_PERCENT_FILE: &str = "quota-percent";
+const FIELDS_FILE: &str = "fields";
+const BRAND_COLORS_FILE: &str = "brand-colors";
+const AGENT_ORDER_FILE: &str = "agent-order";
+const LOW_QUOTA_ALERT_FILE: &str = "low-quota-alert";
+/// One line per provider that is currently below the alert threshold, so a
+/// crossing notifies once instead of on every refresh.
+const LOW_QUOTA_ALERTED_FILE: &str = "low-quota-alerted";
 const MAX_STATUSLINE_SESSIONS: usize = 128;
 
 #[derive(Debug, Clone)]
@@ -438,6 +448,149 @@ impl CacheStore {
         }
     }
 
+    /// The percentage style every renderer reads.
+    ///
+    /// This one lives in the state directory rather than only in the plugin
+    /// config directory because the Claude/Agy statusLine hooks are launched
+    /// by their harness with just `HERDR_PLUGIN_STATE_DIR` set — the config
+    /// directory is not injected there, so a preference kept only in it would
+    /// be invisible to half the renderers.
+    pub fn percent_style(&self) -> Option<PercentStyle> {
+        fs::read_to_string(self.quota_percent_path())
+            .ok()
+            .as_deref()
+            .and_then(PercentStyle::parse)
+    }
+
+    pub fn set_percent_style(&self, style: PercentStyle) -> Result<()> {
+        self.ensure()?;
+        fs::write(self.quota_percent_path(), style.as_str()).context("write quota percent style")
+    }
+
+    pub fn clear_percent_style(&self) -> Result<()> {
+        match fs::remove_file(self.quota_percent_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("remove quota percent style"),
+        }
+    }
+
+    /// The sidebar settings that shaped the rows currently on disk.
+    ///
+    /// Uninstall needs them to recognise its own work, and the settings pane
+    /// needs them to open on what is actually installed.
+    pub fn fields(&self) -> Option<FieldSet> {
+        fs::read_to_string(self.fields_path())
+            .ok()
+            .as_deref()
+            .and_then(FieldSet::parse)
+    }
+
+    pub fn set_fields(&self, fields: FieldSet) -> Result<()> {
+        self.ensure()?;
+        fs::write(self.fields_path(), fields.as_list()).context("write sidebar fields")
+    }
+
+    pub fn clear_fields(&self) -> Result<()> {
+        match fs::remove_file(self.fields_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("remove sidebar fields"),
+        }
+    }
+
+    pub fn brand_colors(&self) -> Option<BrandColors> {
+        fs::read_to_string(self.brand_colors_path())
+            .ok()
+            .as_deref()
+            .and_then(BrandColors::parse)
+    }
+
+    pub fn set_brand_colors(&self, colors: BrandColors) -> Result<()> {
+        self.ensure()?;
+        fs::write(self.brand_colors_path(), colors.as_str()).context("write brand colors")
+    }
+
+    pub fn clear_brand_colors(&self) -> Result<()> {
+        match fs::remove_file(self.brand_colors_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("remove brand colors"),
+        }
+    }
+
+    pub fn agent_order(&self) -> Option<AgentOrder> {
+        fs::read_to_string(self.agent_order_path())
+            .ok()
+            .as_deref()
+            .and_then(AgentOrder::parse)
+    }
+
+    pub fn set_agent_order(&self, order: AgentOrder) -> Result<()> {
+        self.ensure()?;
+        fs::write(self.agent_order_path(), order.as_str()).context("write agent order")
+    }
+
+    pub fn clear_agent_order(&self) -> Result<()> {
+        match fs::remove_file(self.agent_order_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("remove agent order"),
+        }
+    }
+
+    pub fn low_quota_alert(&self) -> Option<LowQuotaAlert> {
+        fs::read_to_string(self.low_quota_alert_path())
+            .ok()
+            .as_deref()
+            .and_then(LowQuotaAlert::parse)
+    }
+
+    pub fn set_low_quota_alert(&self, alert: LowQuotaAlert) -> Result<()> {
+        self.ensure()?;
+        fs::write(self.low_quota_alert_path(), alert.to_string()).context("write low quota alert")
+    }
+
+    pub fn clear_low_quota_alert(&self) -> Result<()> {
+        for path in [self.low_quota_alert_path(), self.low_quota_alerted_path()] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("remove low quota alert"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Providers that have already been notified and have not recovered above
+    /// the threshold since.
+    ///
+    /// Kept as a set rather than a timestamp so a quota that stays low stays
+    /// quiet for as long as it stays low, however many refreshes pass, and
+    /// notifies again the moment it drops back after recovering.
+    pub fn low_quota_alerted(&self) -> Vec<String> {
+        fs::read_to_string(self.low_quota_alerted_path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn set_low_quota_alerted(&self, sources: &[String]) -> Result<()> {
+        if sources.is_empty() {
+            return match fs::remove_file(self.low_quota_alerted_path()) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).context("clear low quota alert state"),
+            };
+        }
+        self.ensure()?;
+        fs::write(self.low_quota_alerted_path(), sources.join("\n"))
+            .context("write low quota alert state")
+    }
+
     pub fn validate_watch_interval_seconds(seconds: u64) -> Result<u64> {
         Self::valid_watch_interval(seconds).with_context(|| {
             format!(
@@ -531,6 +684,30 @@ impl CacheStore {
 
     fn row_gap_path(&self) -> PathBuf {
         self.root.join(ROW_GAP_FILE)
+    }
+
+    fn quota_percent_path(&self) -> PathBuf {
+        self.root.join(QUOTA_PERCENT_FILE)
+    }
+
+    fn fields_path(&self) -> PathBuf {
+        self.root.join(FIELDS_FILE)
+    }
+
+    fn brand_colors_path(&self) -> PathBuf {
+        self.root.join(BRAND_COLORS_FILE)
+    }
+
+    fn agent_order_path(&self) -> PathBuf {
+        self.root.join(AGENT_ORDER_FILE)
+    }
+
+    fn low_quota_alert_path(&self) -> PathBuf {
+        self.root.join(LOW_QUOTA_ALERT_FILE)
+    }
+
+    fn low_quota_alerted_path(&self) -> PathBuf {
+        self.root.join(LOW_QUOTA_ALERTED_FILE)
     }
 
     fn valid_watch_interval(seconds: u64) -> Option<u64> {

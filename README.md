@@ -87,6 +87,68 @@ herdr-agent-quota configure --apply --agent claude,codex,pi
 Accepted values are `all`, `claude`, `codex`, `grok`, `agy`, `opencode`, and
 `pi`. The installer never replaces user-owned sidebar rows or statusLine hooks.
 
+### Change settings without reinstalling
+
+Open the **Agent quota settings** plugin pane. Everything the installer flags
+set can be changed there, including which agents are installed:
+
+```
+Agent quota settings
+====================
+  ─ Display ───
+>   Percentages     <   used    > how much quota is spent
+    Sidebar layout  <  packed   > cache·ttl and 5h·7d share a row
+    Row gap         <     1     > one blank row between panes
+    Watch interval  <    1m     > polled while an agent is working
+    Brand colors    <    on     > provider and model in agent hues
+    Agent order     <  default  > Herdr sorts the agent panel
+    Low quota alert <    off    > no notification
+  ─ Fields ───
+    [x] topic   [x] model   [x] cache   [x] ttl
+    [x] context [x] 5h      [x] 7d
+  ─ Agents ───
+    [x] claude  [x] codex   [x] grok    …
+
+  ↑↓ row  ←→/space value  a apply  q quit
+```
+
+`*` marks an edit that has not been applied. `a` runs the same
+`configure --apply` the "Install / repair" action runs, reloads Herdr's
+configuration, and forces one refresh, so the new rows and the values inside
+them both appear immediately.
+
+Unchecking an agent **uninstalls** that agent's collector and gives its own
+statusLine entry back, so it asks for a second `a` before doing it. The last
+agent cannot be unchecked.
+
+Fields are the optional quota values. The provider name and the error token are
+always shown: a row that cannot say which subscription it belongs to, or that
+hides the reason quota is missing, is worse than no row.
+
+**Agent order** `quota` puts the agent with the least quota left at the top of
+Herdr's Agent panel. It works by handing Herdr a declarative agent view sorted
+by a hidden `quota_headroom` token this plugin publishes, so the ordering
+follows the same number the sidebar shows — the tighter of the 5h and 7d
+windows. Herdr keeps one such view, so turning this on replaces your own
+`ui.agent_panel_sort` policy until you set it back to `default`; uninstalling
+hands the panel back too. The view does not survive a Herdr restart, and the
+plugin's startup hook puts it back.
+
+**Low quota alert** notifies once, per provider, when its remaining quota falls
+to the chosen percentage or below. It stays quiet for as long as the quota
+stays low and warns again only after the quota has recovered above the
+threshold — a window that resets and is spent again warns again. `off` is the
+default and never notifies.
+
+The same choices from the command line:
+
+```sh
+./install.sh --fields topic,model,context,5h,7d
+./install.sh --brand-colors off
+./install.sh --agent-order quota --low-quota-alert 10
+herdr-agent-quota configure --apply --fields all --brand-colors on
+```
+
 Refresh or uninstall:
 
 ```sh
@@ -155,6 +217,13 @@ numbers match would be very helpful. Issues and PRs are welcome.
 - Rows whose tokens are all empty collapse. Plugin-owned layouts use
   `row_gap = 1` (one blank row between panes). Pass `--row-gap 0` to pack them
   flush. Herdr only accepts whole rows; a user-owned `row_gap` is left alone.
+- Every quota field except the provider name and the error token can be turned
+  off with `--fields`, and `--brand-colors off` drops the per-agent hues while
+  keeping the severity colors.
+- Quota percentages read as remaining quota by default. `--quota-percent used`
+  flips every 5h/7d/30d number to what has been consumed instead; the sidebar
+  token keeps its width, and the color still follows what is left, so red
+  always means "little runway".
 - Provider/model, topic, cache/TTL, context, and limits appear only when known.
 - Tab names use primary text (`#eceef2`). The prompt is body text
   (`#c8cdd6`). Cache, TTL, and context stay muted (`#969eae`). Brand color is
@@ -171,15 +240,17 @@ numbers match would be very helpful. Issues and PRs are welcome.
 - Metadata is written only when a token changed and remains under Herdr's
   16-token limit.
 
-The default watcher interval is 60 seconds. Sidebar layout is `packed` and
-row gap is `1` unless you pass something else; both choices persist across a
-later repair:
+The default watcher interval is 60 seconds. Sidebar layout is `packed`, row gap
+is `1`, and percentages are `remaining` unless you pass something else; every
+choice persists across a later repair:
 
 ```sh
 ./install.sh --watch-interval-seconds 300
 ./install.sh --sidebar-layout stacked
 ./install.sh --row-gap 0
+./install.sh --quota-percent used
 herdr-agent-quota configure --apply --sidebar-layout packed --row-gap 1
+herdr-agent-quota configure --apply --quota-percent remaining
 ```
 
 ## Data and privacy

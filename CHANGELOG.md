@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-01
+
 ### Added
 
 - omp (oh-my-pi) is a supported harness: `--agent omp`, its own settings row,
@@ -512,7 +514,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A popup dashboard pane, event-driven refresh, and a local snapshot cache that
   survives provider failures.
 
-[Unreleased]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v0.2.0...v1.0.0

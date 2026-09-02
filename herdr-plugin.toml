@@ -68,7 +68,7 @@ id = "open-settings-win"
 title = "Open agent quota settings"
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  "& $env:HERDR_BIN_PATH plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus"
+  "& $env:HERDR_BIN_PATH plugin pane open --plugin herdr-agent-quota --entrypoint settings-win --focus"
 ]
 platforms = ["windows"]
 

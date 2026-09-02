@@ -169,6 +169,135 @@ existing `#[cfg(unix)]` code:
   already-live-verified pattern, but this repo's own copy of it is unverified
   end-to-end.
 
+## Live-tested against a running Herdr server (2026-09-02)
+
+Linked into `%APPDATA%\herdr\plugins.json` (`herdr plugin link
+C:\git-repositories\10-herdr\herdr-agent-quota --disabled`, herdr
+`0.8.2-preview.2026-08-31-b1ff4582e968`) and exercised against an isolated
+named session (`herdr --session agent-quota-smoke server`, headless,
+`%APPDATA%\herdr\sessions\agent-quota-smoke\`), following the sibling
+`herdr-cache-ttl` fork's recipe exactly — the real `default` session's own
+panes/workspaces were never touched. A throwaway pane (`w1:p1`) was created
+with `herdr workspace create --cwd <path> --focus` against the smoke
+session's own socket (`$env:HERDR_SOCKET_PATH` pointed at
+`sessions\agent-quota-smoke\herdr.sock` for every CLI call below). `configure`
+and `uninstall` were never invoked, per the task's constraint.
+
+- **Named-pipe `socket_request` — confirmed working end-to-end.** Unlike
+  `herdr-cache-ttl`'s `sort`/`sort-win`, this plugin's socket call
+  (`agent.view.set`/`agent.view.clear`) is not reachable through any of its
+  four manifest actions — grepping `src/` showed it is only reached from
+  `refresh.rs::startup()` (`Command::Startup`, i.e. the `[[startup]]` hook),
+  gated on `resolved_agent_order(None, Some(&cache)).is_quota()`, and
+  `resolved_agent_order` checks the `HERDR_AGENT_QUOTA_AGENT_ORDER` env var
+  before any stored preference. Since `herdr plugin action invoke` has no
+  `--env` flag (confirmed via `--help`) and writing the stored preference
+  would have meant either running `configure` (forbidden) or hand-writing a
+  file under the *shared, per-machine* `HERDR_PLUGIN_CONFIG_DIR` while the
+  plugin was enabled — risking the real `default` session's own
+  event-triggered `startup`/refresh picking up a global "quota" preference —
+  the socket path was exercised by running the built exe directly (not
+  through `herdr plugin action invoke`) with
+  `HERDR_SOCKET_PATH`/`HERDR_PLUGIN_STATE_DIR`/`HERDR_PLUGIN_CONFIG_DIR`
+  pointed at the isolated session/a scratch dir and
+  `HERDR_AGENT_QUOTA_AGENT_ORDER=quota` set only in that one process's
+  environment (never persisted to disk, never visible to any other
+  invocation): `.\target\release\herdr-agent-quota.exe startup --provider
+  all` → exit code 0, and the smoke session's `herdr-server.log` shows
+  `request_id="agent-quota:view-set" method="agent.view.set" ...
+  outcome="ok"` about a minute later (the delay is just how long `startup`'s
+  own provider refresh pass took before returning). This proves the Windows
+  `CreateFileW`/`WriteFile`/`ReadFile`/`WaitNamedPipeW` sequence in
+  `socket_request` actually round-trips against a live Herdr server, not just
+  its own unit tests. `agent.view.clear` was not separately exercised (no CLI
+  path reaches it outside `configure`/`uninstall`); not considered a gap
+  worth closing given `set` and `clear` share the same `socket_request`
+  function and only differ in the JSON payload.
+- **Windows manifest actions — `refresh-win` confirmed working;
+  `open-settings-win` found broken and fixed.** `herdr plugin action invoke
+  refresh-win --plugin herdr-agent-quota` → `herdr plugin log list` showed
+  `exit_code 0`, `status:"succeeded"`, empty `stdout`/`stderr` (expected: the
+  manifest command omits `--json`, and `run_internal` only prints when `json`
+  is true — this is correct silent-success behavior, not a swallowed error).
+  `open-settings-win`, as originally ported, **failed**: `exit_code 1`,
+  `stderr: {"error":{"code":"platform_unsupported","message":"plugin pane
+  does not support the current platform (windows)"}}`. Root cause: the
+  windows action's command still said `--entrypoint settings` (the
+  macos/linux-only pane id) instead of `--entrypoint settings-win` — a
+  leftover from copying the unix action's body during the port.
+  `tests/plugin_manifest.rs::settings_are_an_action_backed_by_a_plugin_pane`
+  only asserts this for the `open-settings`/`settings` pair, not the `-win`
+  variant, so `cargo test` never caught it. **Fixed** in this pass
+  (`herdr-plugin.toml`'s `open-settings-win` action now passes `--entrypoint
+  settings-win`); `cargo test --test plugin_manifest` still passes (7/7)
+  after the fix. Re-linked (`herdr plugin link
+  C:\git-repositories\10-herdr\herdr-agent-quota`, no flag — confirmed this
+  preserves the existing `enabled` state rather than resetting it) and
+  re-invoked: the error changed from `platform_unsupported` to a *different*
+  failure, `plugin_pane_open_failed` / `"popup already open"` — because the
+  `dashboard-win` popup opened earlier in this same test pass (see below) was
+  still open and Herdr only allows one popup at a time. That confirms the
+  entrypoint fix itself resolved cleanly (platform/entrypoint lookup
+  succeeded); the `-win` action was not re-verified to a clean `exit_code 0`
+  end-to-end because there was no CLI-reachable way found in this pass to
+  close a popup pane opened against a headless session with no attached
+  terminal client (`herdr pane list` does not enumerate popup panes — only
+  the workspace's real split panes, `w1:p1`). Treat `open-settings-win` as
+  fixed-and-plausible, not fully closed-loop verified.
+- **`dashboard-win` pane — opens and stays alive.** `herdr plugin pane open
+  --plugin herdr-agent-quota --entrypoint dashboard-win --focus` → `{"type":
+  "ok"}`, and the smoke session's `herdr-server.log` shows `pane.spawn.start`
+  → `pane.spawned outcome="ok" pane_id=2 pid=<pid>` → `api.request.complete
+  outcome="ok"`. The spawned `powershell.exe` process (running the
+  `herdr-agent-quota.exe dashboard` launcher) was confirmed still alive via
+  `Get-Process -Id <pid>` after the RPC returned — it did not immediately
+  exit/crash. No attached TUI client means the popup's actual rendered
+  content was not visually inspected, only that the process spawn and
+  continued liveness succeeded; same structural-only limitation
+  `herdr-cache-ttl`'s CLAUDE.md notes for its own pane/event testing.
+- **No unexpected activity observed against the real `default` session.**
+  Constraint from the task: enabling the plugin is a global toggle, so its
+  `[[events]]` could in principle fire for real panes in `default` while
+  enabled. The `default` session's own `herdr-server.log` was checked for the
+  full enabled window (~10:40–10:46 UTC) and shows only ordinary
+  workspace/tab-focus and session-save lines from the human's own use of
+  Herdr during that time — no `plugin.event.invoke`/`agent-quota-refresh`
+  entries and no errors. (This is not a guarantee the event hooks are
+  side-effect-free in general — no real pane happened to change agent status
+  during this specific window — just confirmation nothing went wrong in the
+  window actually exercised.)
+- **The `HOME` gap named in this repo's own "Not touched" section was hit in
+  practice, for Grok specifically.** `$env:HOME` on this machine is empty
+  (`$env:USERPROFILE` is set instead, confirmed before testing). `refresh
+  --provider all --force --json` returned `{"provider":"codex","error":"start
+  codex app-server", ...}` and `{"provider":"grok","error":"resolve Grok auth
+  path", ...}` — `anyhow::Error::to_string()` only prints the outermost
+  `.context(...)` message, not the full chain, so these two need reading
+  against `src/`. Codex's error is **not** the `HOME` gap: `codex.rs:163`
+  shows `command.spawn().context("start codex app-server")` fails before
+  `codex_home()` (and therefore before its `HOME` read) is ever reached — the
+  `codex` binary simply is not on PATH on this machine, an unrelated
+  precondition. Grok's error **is** the documented `HOME` gap:
+  `grok.rs::auth_path()` reads `HOME` unconditionally
+  (`.context("HOME is not set")?`) before ever checking `GROK_HOME`. Proven
+  causally, not just by inspection: re-running the same `refresh --provider
+  grok --json` with `$env:HOME` set to a scratch directory changed the error
+  from `"resolve Grok auth path"` to `"provider credentials are unavailable"`
+  (a later-stage, expected failure — the fake `HOME` has no real Grok auth
+  file) — confirming the missing `HOME` was what blocked it before. `HOME`
+  was left unset again afterward; nothing in this pass touched the real
+  environment persistently.
+- **Final state left in `plugins.json`: `herdr-agent-quota` is `enabled:
+  false`** (linked but disabled), matching the state found before this test
+  pass (the plugin was not registered in `plugins.json` at all beforehand).
+  Chosen over leaving it enabled because a real manifest bug was found and
+  only partially closed-loop re-verified (see `open-settings-win` above) —
+  per this task's own instructions, that counts as testing that was not
+  fully clean, so the safer default (disabled) was kept rather than exercised
+  judgment to leave it on. The isolated `agent-quota-smoke` session was
+  stopped (`herdr session stop agent-quota-smoke`) and left in the `stopped`
+  state alongside the pre-existing `probe*` sessions, not deleted.
+
 ## Extended beyond the task's literal three-item list
 
 The task that drove this port named `herdr.rs`, `process.rs`, and

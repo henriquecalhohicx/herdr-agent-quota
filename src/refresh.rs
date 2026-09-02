@@ -860,6 +860,23 @@ fn spawn_watch() -> Result<()> {
             Ok(())
         });
     }
+    #[cfg(windows)]
+    {
+        // Windows has no setsid/session equivalent. The nearest analog of
+        // detaching from the short-lived event process's session is
+        // CREATE_NEW_PROCESS_GROUP (the watcher stops receiving
+        // Ctrl+C/Ctrl+Break meant for whatever console spawned the event
+        // process) combined with DETACHED_PROCESS (no console at all, so
+        // there is nothing for the hook supervisor to tear down when the
+        // event process's own console goes away). This is a stdlib call —
+        // `std::os::windows::process::CommandExt::creation_flags` — not a
+        // windows-sys one, so the numeric flag values are spelled out here
+        // rather than imported.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
     command.spawn().context("start active-turn quota watcher")?;
     Ok(())
 }

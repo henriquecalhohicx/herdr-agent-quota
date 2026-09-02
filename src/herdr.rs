@@ -218,6 +218,7 @@ pub fn clear_quota_agent_view() -> Result<()> {
 ///
 /// Outside Herdr there is no socket and this is a no-op, exactly like
 /// [`crate::prefs::write`], so a direct CLI run still works.
+#[cfg(unix)]
 fn socket_request(payload: &Value) -> Result<Option<Value>> {
     use std::io::{BufRead, BufReader, Write};
 
@@ -244,6 +245,168 @@ fn socket_request(payload: &Value) -> Result<Option<Value>> {
         anyhow::bail!("{message}");
     }
     Ok(Some(reply))
+}
+
+/// Windows counterpart of the unix socket request above.
+///
+/// Herdr injects `HERDR_SOCKET_PATH` as a filesystem-style path (with a
+/// placeholder file of that name alongside it), but the real Windows IPC
+/// endpoint is the named pipe `\\.\pipe\<that path>` — opening the bare path
+/// lands on the placeholder and fails with a sharing violation (the same
+/// finding already recorded in the sibling `herdr-cache-ttl` fork's
+/// `CLAUDE.md`, verified there against live herdr 0.8). Unlike that fork's
+/// `socket_send`, this call is not fire-and-forget: it opens the pipe for
+/// both directions, writes one NDJSON line, and reads one line back, mirroring
+/// the unix path's write-then-`read_line` shape exactly.
+///
+/// Known limitation: `ReadFile` on a byte-mode pipe handle opened this way has
+/// no equivalent of the unix path's `set_read_timeout`/`set_write_timeout`
+/// (`SOCKET_TIMEOUT`, 5s) — a stalled or wedged Herdr server could block this
+/// call indefinitely instead of failing after 5 seconds. A real timeout needs
+/// overlapped I/O (`ReadFile`/`WriteFile` with an `OVERLAPPED` struct and
+/// `WaitForSingleObject`), which is a bigger change than this pass attempts;
+/// tracked as a known gap in this repo's `CLAUDE.md`.
+#[cfg(windows)]
+fn socket_request(payload: &Value) -> Result<Option<Value>> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+    let Some(path) = std::env::var_os("HERDR_SOCKET_PATH") else {
+        return Ok(None);
+    };
+    let path = path.to_string_lossy().into_owned();
+    let pipe_name = windows_pipe_name(&path);
+    let wide = to_wide_null_terminated(&pipe_name);
+
+    struct HandleGuard(HANDLE);
+    impl Drop for HandleGuard {
+        fn drop(&mut self) {
+            // SAFETY: handle came from a successful CreateFileW below and is
+            // closed exactly once, when this guard drops.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    let handle = loop {
+        // SAFETY: wide is NUL-terminated; the returned handle is checked
+        // before use and closed exactly once via HandleGuard.
+        let h = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            break h;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) {
+            // SAFETY: wide is NUL-terminated.
+            if unsafe { WaitNamedPipeW(wide.as_ptr(), SOCKET_TIMEOUT.as_millis() as u32) } == 0 {
+                return Err(anyhow::anyhow!(
+                    "connect to Herdr at {pipe_name}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            continue;
+        }
+        return Err(anyhow::anyhow!("connect to Herdr at {pipe_name}: {err}"));
+    };
+    let guard = HandleGuard(handle);
+
+    let line = format!("{payload}\n");
+    let bytes = line.as_bytes();
+    let mut written: u32 = 0;
+    // SAFETY: bytes is valid for bytes.len(); written is caller-owned.
+    let ok = unsafe {
+        WriteFile(
+            guard.0,
+            bytes.as_ptr(),
+            bytes.len() as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(anyhow::anyhow!(
+            "send Herdr socket request: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // Herdr answers in NDJSON: read until the first newline. No timeout here
+    // — see the "Known limitation" note above this function.
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let mut read: u32 = 0;
+        // SAFETY: chunk is valid for chunk.len(); read is caller-owned.
+        let ok = unsafe {
+            ReadFile(
+                guard.0,
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            let err = std::io::Error::last_os_error();
+            if buffer.is_empty() {
+                return Err(anyhow::anyhow!("read Herdr socket reply: {err}"));
+            }
+            break;
+        }
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read as usize]);
+        if buffer.contains(&b'\n') {
+            break;
+        }
+    }
+    drop(guard);
+
+    let text = String::from_utf8_lossy(&buffer);
+    let line = text.lines().next().unwrap_or("");
+    let reply: Value = serde_json::from_str(line).context("parse Herdr socket reply")?;
+    if let Some(error) = reply.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Herdr rejected the request");
+        anyhow::bail!("{message}");
+    }
+    Ok(Some(reply))
+}
+
+#[cfg(windows)]
+fn to_wide_null_terminated(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Pure prefix logic behind the Windows `socket_request`, split out for unit
+/// testing without touching a real pipe. Mirrors `herdr-cache-ttl`'s
+/// `pipe_name_str`.
+#[cfg(windows)]
+fn windows_pipe_name(raw: &str) -> String {
+    if raw.starts_with(r"\\.\pipe\") || raw.starts_with(r"\\?\pipe\") {
+        raw.to_string()
+    } else {
+        format!(r"\\.\pipe\{raw}")
+    }
 }
 
 pub fn list_agent_panes() -> Result<Vec<AgentPane>> {
@@ -815,6 +978,22 @@ mod tests {
         CacheUsage, ContextUsage, ProviderSnapshot, ResetAt, UsageWindow, WindowKind,
     };
     use serde_json::json;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_name_prepends_the_pipe_prefix_to_a_filesystem_path() {
+        assert_eq!(
+            windows_pipe_name(r"C:\Users\me\AppData\Roaming\herdr\herdr.sock"),
+            r"\\.\pipe\C:\Users\me\AppData\Roaming\herdr\herdr.sock",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_name_leaves_an_existing_pipe_path_untouched() {
+        assert_eq!(windows_pipe_name(r"\\.\pipe\herdr"), r"\\.\pipe\herdr");
+        assert_eq!(windows_pipe_name(r"\\?\pipe\herdr"), r"\\?\pipe\herdr");
+    }
 
     /// Herdr orders an Agent view by the token's own value, so the padding is
     /// the whole contract: `007` must sort before `042`, and `100` last.

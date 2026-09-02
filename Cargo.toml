@@ -36,6 +36,24 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows counterpart of the raw HERDR_SOCKET_PATH request (named pipe) and
+# the Job Object used to kill the previous-statusLine shell's whole process
+# tree on a timeout. The detached quota watcher's process-group equivalent
+# (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS) is a stdlib
+# `CommandExt::creation_flags` call and needs no windows-sys feature at all.
+# Pinned to the same 0.59 release the sibling `herdr-cache-ttl` fork already
+# uses in this workspace, to avoid needless version drift.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Pipes",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_IO",
+  "Win32_Security",
+] }
+
 [dev-dependencies]
 tempfile = "3.14"
 

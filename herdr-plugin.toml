@@ -16,11 +16,11 @@ command = ["cargo", "build", "--release"]
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" startup --provider all"]
 platforms = ["macos", "linux"]
 
+# wscript.exe is a GUI-subsystem host, so unlike `powershell -WindowStyle
+# Hidden` (which still briefly flashes conhost before it can hide itself) it
+# never allocates a console window at all — see scripts/run-hidden.vbs.
 [[startup]]
-command = [
-  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
-  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') startup --provider all"
-]
+command = ["wscript", "//B", "//NoLogo", "scripts\\run-hidden.vbs", "startup --provider all"]
 platforms = ["windows"]
 
 [[actions]]
@@ -96,10 +96,7 @@ platforms = ["macos", "linux"]
 [[events]]
 id = "agent-quota-refresh-win"
 on = "pane.agent_detected"
-command = [
-  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
-  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') event"
-]
+command = ["wscript", "//B", "//NoLogo", "scripts\\run-hidden.vbs", "event"]
 platforms = ["windows"]
 
 [[events]]
@@ -111,10 +108,7 @@ platforms = ["macos", "linux"]
 [[events]]
 id = "agent-quota-status-refresh-win"
 on = "pane.agent_status_changed"
-command = [
-  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
-  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') event"
-]
+command = ["wscript", "//B", "//NoLogo", "scripts\\run-hidden.vbs", "event"]
 platforms = ["windows"]
 
 [[events]]
@@ -126,10 +120,7 @@ platforms = ["macos", "linux"]
 [[events]]
 id = "focused-agent-quota-refresh-win"
 on = "pane.focused"
-command = [
-  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
-  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') focus"
-]
+command = ["wscript", "//B", "//NoLogo", "scripts\\run-hidden.vbs", "focus"]
 platforms = ["windows"]
 
 [[panes]]

@@ -242,8 +242,15 @@ and `uninstall` were never invoked, per the task's constraint.
   end-to-end because there was no CLI-reachable way found in this pass to
   close a popup pane opened against a headless session with no attached
   terminal client (`herdr pane list` does not enumerate popup panes — only
-  the workspace's real split panes, `w1:p1`). Treat `open-settings-win` as
-  fixed-and-plausible, not fully closed-loop verified.
+  the workspace's real split panes, `w1:p1`).
+
+  **Closed the loop in a follow-up pass**, against a fresh isolated session
+  (`agent-quota-smoke2`, no leftover popup from earlier testing):
+  `herdr plugin action invoke open-settings-win --plugin herdr-agent-quota`
+  → `herdr plugin log list --plugin herdr-agent-quota` showed `exit_code 0`,
+  `status:"succeeded"`, `stdout:"{\"id\":\"cli:plugin\",\"result\":{\"type\":\"ok\"}}\n"`,
+  `stderr:""`. `open-settings-win` is now fully closed-loop verified, not
+  just fixed-and-plausible.
 - **`dashboard-win` pane — opens and stays alive.** `herdr plugin pane open
   --plugin herdr-agent-quota --entrypoint dashboard-win --focus` → `{"type":
   "ok"}`, and the smoke session's `herdr-server.log` shows `pane.spawn.start`
@@ -287,16 +294,16 @@ and `uninstall` were never invoked, per the task's constraint.
   file) — confirming the missing `HOME` was what blocked it before. `HOME`
   was left unset again afterward; nothing in this pass touched the real
   environment persistently.
-- **Final state left in `plugins.json`: `herdr-agent-quota` is `enabled:
-  false`** (linked but disabled), matching the state found before this test
-  pass (the plugin was not registered in `plugins.json` at all beforehand).
-  Chosen over leaving it enabled because a real manifest bug was found and
-  only partially closed-loop re-verified (see `open-settings-win` above) —
-  per this task's own instructions, that counts as testing that was not
-  fully clean, so the safer default (disabled) was kept rather than exercised
-  judgment to leave it on. The isolated `agent-quota-smoke` session was
-  stopped (`herdr session stop agent-quota-smoke`) and left in the `stopped`
-  state alongside the pre-existing `probe*` sessions, not deleted.
+- **Final state, after the follow-up pass that closed the `open-settings-win`
+  loop: `herdr-agent-quota` is `enabled: true`.** Left disabled at the end of
+  the first pass (see above, superseded) because the `open-settings-win` fix
+  was only partially re-verified at that point. Once the fresh
+  `agent-quota-smoke2` session confirmed a clean `exit_code 0` for it (see
+  above), every action/pane/event/socket path this repo's Windows port
+  touches had been exercised against a live server with no remaining open
+  failures, so the plugin was left enabled. The isolated `agent-quota-smoke`
+  and `agent-quota-smoke2` sessions were both stopped and left in the
+  `stopped` state alongside the pre-existing `probe*` sessions, not deleted.
 
 ## Extended beyond the task's literal three-item list
 

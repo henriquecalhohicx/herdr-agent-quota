@@ -575,6 +575,15 @@ mod tests {
     /// The whole subprocess path, against a stub that records how it was
     /// called: the provider filter has to reach omp, and the report has to come
     /// back parsed.
+    ///
+    /// The stub is a `#!/bin/sh` script executed directly by path, which
+    /// relies on the OS honoring the shebang line — Windows' `CreateProcess`
+    /// does not do this (`fetch` would need a real `omp` binary or a
+    /// Windows-native stub to exercise this path there), so this test is
+    /// unix-only. Not part of this pass's three-item Windows-port scope;
+    /// tracked as a known gap in this repo's CLAUDE.md, same as
+    /// `tests/configure_round_trip.rs`.
+    #[cfg(unix)]
     #[test]
     fn the_cli_is_called_for_one_provider_and_its_report_is_parsed() {
         let dir = tempfile::tempdir().unwrap();

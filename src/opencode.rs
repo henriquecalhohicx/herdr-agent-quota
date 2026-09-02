@@ -585,6 +585,12 @@ mod tests {
         assert_eq!(model_context_window(&paths, "opencode", "big-pickle"), None);
     }
 
+    // `?` is invalid in an NTFS filename component, so this directory cannot
+    // exist on Windows at all — `create_dir_all` itself would fail with
+    // `InvalidFilename`, before the URI-escaping logic under test ever runs.
+    // Not part of this pass's three-item Windows-port scope; tracked as a
+    // known gap in this repo's CLAUDE.md.
+    #[cfg(unix)]
     #[test]
     fn database_opens_under_a_path_containing_uri_punctuation() {
         let directory = tempdir().unwrap();

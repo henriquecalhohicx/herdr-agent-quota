@@ -1,3 +1,14 @@
+// This suite drives fake `herdr`/statusLine binaries by writing out
+// `#!/bin/sh` scripts and executing them directly — `Command::new(path)`
+// relies on the OS honoring the shebang line to find an interpreter, which
+// Windows' `CreateProcess` does not do. Porting these stubs to something
+// Windows can execute directly (a `.cmd`/`.bat` or a PowerShell script) is a
+// separate, considerably larger effort than the three Windows-port items this
+// pass covers (named-pipe socket, Job Object process kill, detached watcher
+// spawn) — tracked as a known gap in this repo's CLAUDE.md rather than
+// attempted here. Every other test file in this suite is platform-neutral.
+#![cfg(unix)]
+
 use herdr_agent_quota::cache::CacheStore;
 use herdr_agent_quota::configure::herdr::{add_quota_row, remove_quota_row};
 use herdr_agent_quota::model::{Provider, ProviderSnapshot, UsageWindow, WindowKind};

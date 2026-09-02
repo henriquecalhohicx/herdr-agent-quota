@@ -159,12 +159,20 @@ fn repair_migrates_a_previous_backup_from_the_old_state_directory() {
         r#"{"type":"command","command":"echo user-owned"}"#,
     )
     .unwrap();
+    // Built with `serde_json::json!` rather than a hand-formatted string:
+    // `old_state.display()` is a Windows path on this platform, and it must
+    // be JSON-escaped (backslashes doubled) before landing inside a string
+    // literal, or the settings file this test writes is not valid JSON.
+    let command = format!(
+        "HERDR_PLUGIN_STATE_DIR='{}' '/old/herdr-agent-quota' claude-statusline",
+        old_state.display()
+    );
     fs::write(
         &settings,
-        format!(
-            r#"{{"statusLine":{{"type":"command","command":"HERDR_PLUGIN_STATE_DIR='{}' '/old/herdr-agent-quota' claude-statusline"}}}}"#,
-            old_state.display()
-        ),
+        serde_json::to_vec(&serde_json::json!({
+            "statusLine": {"type": "command", "command": command}
+        }))
+        .unwrap(),
     )
     .unwrap();
 

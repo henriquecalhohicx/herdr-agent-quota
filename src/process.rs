@@ -29,7 +29,7 @@ pub const STATUSLINE_COMMAND_BUDGET: Duration = Duration::from_secs(2);
 /// previous statusLine shell command, which in practice does not fork a
 /// long-lived helper in that window.
 #[cfg(windows)]
-struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
+pub(crate) struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
 
 // SAFETY: a Win32 HANDLE is an opaque, thread-agnostic kernel object
 // reference; every Win32 call this module makes on it (AssignProcessToJobObject,
@@ -48,7 +48,7 @@ impl WindowsJob {
     /// anything still assigned to it — the same "nothing survives the
     /// parent" guarantee unix gets from the process group plus an explicit
     /// `killpg`.
-    fn new() -> std::io::Result<Self> {
+    pub(crate) fn new() -> std::io::Result<Self> {
         use windows_sys::Win32::System::JobObjects::{
             CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -82,7 +82,7 @@ impl WindowsJob {
 
     /// Assign a freshly spawned child to this job. See the race-window note
     /// on the struct itself for why "freshly" matters.
-    fn assign(&self, child: &Child) -> std::io::Result<()> {
+    pub(crate) fn assign(&self, child: &Child) -> std::io::Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
@@ -100,7 +100,7 @@ impl WindowsJob {
     /// `killpg(pid, SIGKILL)`. Best-effort: a failure here (e.g. the job
     /// already has nothing left in it) is not worth surfacing, matching the
     /// unix path's ignored `killpg` return value.
-    fn terminate(&self) {
+    pub(crate) fn terminate(&self) {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
         // SAFETY: handle is valid for the life of `self`; exit code 1 is
         // arbitrary and unused by any caller here.

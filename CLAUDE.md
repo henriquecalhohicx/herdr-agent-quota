@@ -94,6 +94,17 @@ existing `#[cfg(unix)]` code:
    task's own note that this needs no extra crate). `reexec_watch`'s
    `#[cfg(not(unix))]` branch (spawn instead of exec, no detach) already
    existed before this port and was left unchanged.
+4. **`src/providers/codex.rs::terminate`** — the Codex `app-server` subprocess
+   spawned by `fetch_for_sessions` had the identical `setpgid`/`killpg`
+   process-group-kill shape as item 2, minus a Windows counterpart, when this
+   port first landed (see the removed bullet under "Not touched", below —
+   this was picked up in a follow-up pass). `process.rs`'s `WindowsJob` was
+   made `pub(crate)` and reused here verbatim: the job is created and the
+   app-server child assigned to it right after `spawn()`, and both the
+   watchdog thread and the main fetch path call the Windows `terminate`
+   overload (`job.terminate()` then `child.kill()`) instead of the unix one
+   (`killpg` then `child.kill()`). Same race-window caveat as item 2 applies
+   here for the same reason (`Command` has no Windows `pre_exec`).
 
 ## Verification actually performed on this Windows machine
 
@@ -118,6 +129,16 @@ existing `#[cfg(unix)]` code:
   process specifically to check it survives a plain `kill()` but dies with
   the job — that would be the fully conclusive proof and was judged out of
   scope for this pass's effort budget.
+- **`codex.rs::terminate`'s reuse of `WindowsJob` is not independently
+  exercised** the way `process.rs`'s is. There is no test that spawns a real
+  `codex app-server`-shaped child, assigns it to a job, and confirms
+  termination — the existing Codex provider tests all run against fixture
+  JSON, not a real subprocess. It is the same `WindowsJob` type the direct
+  test above proves works end-to-end, but the specific wiring in
+  `fetch_for_sessions`/`terminate` (job creation right after
+  `command.spawn()`, watchdog-thread `Arc` plumbing) has only been proven by
+  `cargo build`/`cargo test` passing, not by an actual kill observed on this
+  machine.
 - **The named-pipe `socket_request` path has NOT been tested against a live
   Herdr server.** Task instructions for this port explicitly excluded running
   `herdr plugin link` or touching this machine's `plugins.json` — that step
@@ -202,15 +223,6 @@ this pass's scope (each is a pre-existing runtime-correctness gap, not a
 compile blocker — the crate already builds and its own tests already pass on
 Windows without touching any of these):
 
-- **`src/providers/codex.rs::terminate`** has the exact same
-  `libc::setpgid`/`killpg` process-group-kill shape as `process.rs` did
-  before this port (used to reap the Codex app-server subprocess spawned by
-  `fetch_for_sessions`), but was not given a `WindowsJob` counterpart. On
-  Windows it currently falls back to `child.kill()` on the immediate
-  app-server process only — a helper the app-server itself spawned would not
-  be caught by a timeout the way `process.rs`'s `run_shell_with_deadline` now
-  is. Same shape as item 2 above; a `WindowsJob` could be reused here nearly
-  verbatim if this is picked up later.
 - **Six call sites unconditionally read the `HOME` environment variable**
   and `.context("HOME is not set")` if it is absent:
   `src/providers/codex.rs::codex_home`, `src/providers/grok.rs`,

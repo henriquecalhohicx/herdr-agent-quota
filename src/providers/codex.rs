@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(windows)]
+use crate::process::WindowsJob;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -159,6 +161,16 @@ pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
         });
     }
     let mut child = command.spawn().context("start codex app-server")?;
+    // See the race-window note on `WindowsJob` in `process.rs` for why this
+    // happens immediately after spawn rather than inside a pre_exec-style
+    // hook (which Windows has no equivalent of). A failure to create or
+    // assign the job is not fatal to fetching quota at all — it just means a
+    // timeout below falls back to killing only the immediate app-server
+    // process, not a helper it may have spawned.
+    #[cfg(windows)]
+    let job: Option<WindowsJob> = WindowsJob::new()
+        .and_then(|job| job.assign(&child).map(|()| job))
+        .ok();
     let mut input = child.stdin.take().context("open codex app-server stdin")?;
     let stdout = child
         .stdout
@@ -170,14 +182,24 @@ pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
     // signalled while it is still unreaped. Signalling a bare pid after
     // `wait` would race with the operating system recycling that pid.
     let child = Arc::new(Mutex::new(Some(child)));
+    #[cfg(windows)]
+    let job = Arc::new(job);
     let watchdog = Arc::clone(&child);
+    #[cfg(windows)]
+    let watchdog_job = Arc::clone(&job);
     thread::spawn(move || {
         thread::sleep(REQUEST_TIMEOUT);
+        #[cfg(unix)]
         terminate(&watchdog);
+        #[cfg(windows)]
+        terminate(&watchdog, watchdog_job.as_ref().as_ref());
     });
 
     let result = fetch_from_process(&mut input, &mut output, session_ids);
+    #[cfg(unix)]
     terminate(&child);
+    #[cfg(windows)]
+    terminate(&child, job.as_ref().as_ref());
     result
 }
 
@@ -185,6 +207,7 @@ pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
 ///
 /// Whichever of the request thread and the watchdog gets here first takes the
 /// child; the other one finds an empty slot and does nothing.
+#[cfg(unix)]
 fn terminate(child: &Mutex<Option<Child>>) {
     let Ok(mut slot) = child.lock() else {
         return;
@@ -194,9 +217,26 @@ fn terminate(child: &Mutex<Option<Child>>) {
     };
     // `pre_exec` put the app-server in its own process group, so this also
     // collects any helper it spawned.
-    #[cfg(unix)]
     unsafe {
         libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Windows counterpart of the unix `terminate` above: the `WindowsJob`
+/// assignment made in `fetch_for_sessions` makes this include any helper the
+/// app-server spawned, the same way `killpg` does on unix.
+#[cfg(windows)]
+fn terminate(child: &Mutex<Option<Child>>, job: Option<&WindowsJob>) {
+    let Ok(mut slot) = child.lock() else {
+        return;
+    };
+    let Some(mut child) = slot.take() else {
+        return;
+    };
+    if let Some(job) = job {
+        job.terminate();
     }
     let _ = child.kill();
     let _ = child.wait();

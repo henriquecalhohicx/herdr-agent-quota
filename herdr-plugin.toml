@@ -3,54 +3,151 @@ name = "Herdr Agent Quota"
 version = "1.3.0"
 min_herdr_version = "0.8.0"
 description = "Credential-scoped AI quota and context for Claude, Codex, Grok, Agy, OpenCode, Pi, and omp."
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 
+# `cargo build --release` is a plain argv command, not a shell script, so it
+# already runs unmodified on every platform in `platforms` above — no
+# windows-scoped twin needed here, unlike every entry below that wraps its
+# command in `sh -c`.
 [[build]]
 command = ["cargo", "build", "--release"]
 
 [[startup]]
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" startup --provider all"]
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') startup --provider all"
+]
+platforms = ["windows"]
 
 [[actions]]
 id = "refresh"
 title = "Refresh agent quota"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" refresh --provider all --force"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "refresh-win"
+title = "Refresh agent quota"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') refresh --provider all --force"
+]
+platforms = ["windows"]
 
 [[actions]]
 id = "configure"
 title = "Install / repair agent quota"
 command = ["sh", "-c", "\"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" configure --apply && herdr server reload-config"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "configure-win"
+title = "Install / repair agent quota"
+# Windows PowerShell 5.1 (invoked here as plain `powershell`, not `pwsh`) has
+# no `&&` operator — that needs PowerShell 7+. `$LASTEXITCODE` after a native
+# `&`-invoked exe is the standard 5.1-compatible equivalent for "only run the
+# next command if the previous one succeeded".
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') configure --apply; if ($LASTEXITCODE -eq 0) { & herdr server reload-config }"
+]
+platforms = ["windows"]
 
 [[actions]]
 id = "open-settings"
 title = "Open agent quota settings"
 command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open-settings-win"
+title = "Open agent quota settings"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "& $env:HERDR_BIN_PATH plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus"
+]
+platforms = ["windows"]
 
 [[actions]]
 id = "uninstall"
 title = "Uninstall agent quota configuration"
 command = ["sh", "-c", "\"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" configure --uninstall && herdr server reload-config"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "uninstall-win"
+title = "Uninstall agent quota configuration"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') configure --uninstall; if ($LASTEXITCODE -eq 0) { & herdr server reload-config }"
+]
+platforms = ["windows"]
 
 [[events]]
 id = "agent-quota-refresh"
 on = "pane.agent_detected"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" event"]
+platforms = ["macos", "linux"]
+
+[[events]]
+id = "agent-quota-refresh-win"
+on = "pane.agent_detected"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') event"
+]
+platforms = ["windows"]
 
 [[events]]
 id = "agent-quota-status-refresh"
 on = "pane.agent_status_changed"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" event"]
+platforms = ["macos", "linux"]
+
+[[events]]
+id = "agent-quota-status-refresh-win"
+on = "pane.agent_status_changed"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') event"
+]
+platforms = ["windows"]
 
 [[events]]
 id = "focused-agent-quota-refresh"
 on = "pane.focused"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" focus"]
+platforms = ["macos", "linux"]
+
+[[events]]
+id = "focused-agent-quota-refresh-win"
+on = "pane.focused"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') focus"
+]
+platforms = ["windows"]
 
 [[panes]]
 id = "dashboard"
 title = "Agent quota"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-quota\" dashboard"]
 placement = "popup"
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "dashboard-win"
+title = "Agent quota"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') dashboard"
+]
+placement = "popup"
+platforms = ["windows"]
 
 [[panes]]
 id = "settings"
@@ -63,3 +160,16 @@ placement = "popup"
 # Herdr clamps to the terminal, and the pane still scrolls when it has to.
 width = 78
 height = 30
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "settings-win"
+title = "Agent quota settings"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') settings"
+]
+placement = "popup"
+width = 78
+height = 30
+platforms = ["windows"]

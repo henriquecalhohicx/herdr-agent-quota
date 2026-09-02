@@ -198,8 +198,32 @@ pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HERDR_CONFIG_FILE") {
         return Ok(PathBuf::from(path));
     }
+    platform_config_path()
+}
+
+/// Herdr's own config root, per platform. Herdr does not inject
+/// `HERDR_CONFIG_FILE` into plugin processes in practice (checked: nothing
+/// in this codebase's own docs or the Herdr agent guide names it as a
+/// variable Herdr sets), so this fallback is what every real invocation
+/// actually uses.
+#[cfg(unix)]
+fn platform_config_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home).join(".config/herdr/config.toml"))
+}
+
+/// Windows counterpart of the unix `~/.config/herdr/config.toml` above.
+/// Herdr's own config root on Windows is `%APPDATA%\herdr\`, not the Unix
+/// XDG convention — see this workspace's own `CLAUDE.md`
+/// ("NOT `~/.config/herdr`"). Before this fix, `configure --apply` on
+/// Windows fell through to the unix path unconditionally: it either failed
+/// outright (`HOME` unset, the common case on a stock Windows shell) or, if
+/// `HOME` happened to be set, silently wrote Herdr's sidebar rows to a file
+/// Herdr never reads.
+#[cfg(windows)]
+fn platform_config_path() -> Result<PathBuf> {
+    let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
+    Ok(PathBuf::from(appdata).join("herdr").join("config.toml"))
 }
 
 fn backup_path() -> Result<Option<PathBuf>> {

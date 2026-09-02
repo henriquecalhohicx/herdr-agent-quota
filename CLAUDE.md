@@ -383,6 +383,111 @@ claude/codex/grok/pi` separately — `configure --apply` only installs the
 collectors, it does not install Herdr's own per-agent integrations, and
 none of those were installed as part of this pass.
 
+## Sidebar formatting and the flash fix, from live use (2026-09-02)
+
+With the plugin live in the sidebar, several rounds of user feedback on the
+actual rendered output drove real code changes beyond the original port:
+
+- **Format changes**, all in `src/presentation.rs` unless noted:
+  - `WindowParts::rendered()` now wraps the reset-ETA in parens (`5h 53%
+    (52m)` instead of `5h 53% 52m`), for every window token, sidebar and
+    dashboard alike.
+  - `provider_model_label()` gained an `account_label: Option<&str>`
+    parameter: Claude panes now show `C1`/`C2` in place of a redundant
+    `Claude/` prefix, detected in `src/providers/claude.rs` from
+    `transcript_path`'s config-directory segment (`.claude` → `C1`,
+    `.claude2` → `C2`, anything else falls back to plain `Claude` rather
+    than guessing). Threaded through as a new per-session field
+    (`account_label`/`session_account_labels` on `ProviderSnapshot`),
+    mirroring `model`/`session_models`'s exact merge/prune/round-trip shape
+    in `src/cache.rs`.
+  - `parse_model()` (`src/providers/statusline.rs`) drops a trailing
+    parenthetical (`"Opus 5 (1M context)"` → `"Opus 5"`) — a capability
+    annotation, not part of the model name, and the sidebar has no room for
+    it next to the rest of the identity row.
+  - `sidebar_cache()` now uses the shared `format_percent()` helper instead
+    of a hardcoded `{:.1}` — `cache 97%` instead of `cache 96.9%`,
+    consistent with every other percentage on the sidebar.
+  - The topic line (`$quota_topic`, the pane's last prompt) is hidden by
+    default via the existing `--fields` preference (`configure --apply
+    --fields model,cache,ttl,context,5h,7d`) — not a code change, just a
+    persisted preference the user asked to have off.
+- **`configure/herdr.rs`: `$quota_provider_model` moved off the identity
+  row onto its own row**, below the tab/state_icon line, since the model
+  was getting cut off sharing a line with longer tab names.
+  `packed_identity_row()` no longer places the token inline;
+  `append_quota_rows()` inserts it as a new row right after instead. This
+  surfaced a real idempotency bug: dropping the token from the identity row
+  meant a repeat `configure --apply` no longer saw that token's presence to
+  skip `normalize_official_row`'s own tab-insertion fallback, so a fresh
+  apply and a repeat apply produced different row shapes for the same
+  input. Fixed by having `packed_identity_row` itself guarantee a tab token
+  is present, the same way it used to guarantee the model token's presence
+  before this change moved it elsewhere — see
+  `packed_layout_puts_the_model_on_its_own_row_below_the_tab` for the
+  regression test.
+- **Flashing console windows — root-caused and fixed in two passes.** This
+  plugin's three events (`pane.agent_detected`, `pane.agent_status_changed`,
+  `pane.focused`) fire every few seconds across active panes — confirmed via
+  this plugin's own `herdr plugin log list` timestamps — each spawning a
+  fresh Windows process per the manifest.
+  1. First pass added `-WindowStyle Hidden` to every Windows
+     action/event/startup PowerShell command. This reduces but does not
+     eliminate the flash: Windows allocates PowerShell's conhost window as
+     part of spawning it, and PowerShell only hides that window a moment
+     later, after it has already appeared — confirmed still flashing after
+     this fix, even though a genuinely recent live event log entry showed
+     the updated `-WindowStyle Hidden` command actually running.
+  2. Second pass replaced the PowerShell wrapper for `[[startup]]` and all
+     three `[[events]]` with `scripts/run-hidden.vbs`, invoked via
+     `wscript.exe` — a GUI-subsystem host that never allocates a console
+     window at all, unlike PowerShell. `Shell.Run`'s window-style parameter
+     is applied before the target process is even created, so nothing is
+     ever shown to flash in the first place. Verified before committing:
+     `wscript` resolves a relative script path correctly against Herdr's
+     extended-length `\\?\` working directory (tested directly against
+     `\\?\C:\git-repositories\10-herdr\herdr-agent-quota`). Verified after:
+     relinked, reloaded config, and watched five real `pane.focused` events
+     fire from the live `default` session, all via `['wscript', '//B',
+     '//NoLogo', 'scripts\run-hidden.vbs', 'focus']`, all `exit_code 0` —
+     matching prior behavior exactly, just without the window.
+     `[[actions]]` (`refresh-win`, `configure-win`, `open-settings-win`,
+     `uninstall-win`) deliberately kept the PowerShell wrapper: they're
+     user-invoked, not the reported flashing source, and `Shell.Run` cannot
+     relay a child's stdout the way Herdr's own process-pipe capture of
+     PowerShell can — `open-settings-win` depends on that for its
+     `{"type":"ok"}` response.
+  - **Known unresolved: a second flash source, outside either pass's
+    scope.** After disabling and then fully uninstalling this plugin
+    (`configure --uninstall`, to get a clean `cache-ttl` comparison — see
+    "Current state" below), the user reported the flashing stopped, which
+    neither pass above fully explains, since both only touched Herdr's own
+    event/startup dispatch. The most likely remaining source is the
+    Claude/Agy statusline collector command itself
+    (`HERDR_PLUGIN_STATE_DIR='...' 'exe' claude-statusline`, installed into
+    `~/.claude/settings.json` by `configure --apply`), invoked directly by
+    Claude Code roughly every 60 seconds per pane — entirely outside
+    Herdr's own process-spawning path, and never touched by either
+    flash-fix pass. If this plugin is re-enabled, re-check whether
+    flashing returns; if so, this is the place to look next (likely the
+    same `wscript.exe` technique, but the wrapper command is built in
+    `configure/statusline.rs::apply_with_refresh_interval`, not
+    `herdr-plugin.toml`, so it can't just be edited in the manifest).
+
+## Current state (2026-09-02, latest)
+
+Disabled, and `configure --uninstall` was run — at the user's request, to
+get a clean side-by-side comparison against the `cache-ttl` fork's sidebar
+(see `10-herdr/CLAUDE.md`'s "Installed Plugins" table and its "disabling
+does not revert configure --apply" gotcha). This is **not** a finding that
+the port is broken; every fix and feature above was live-verified working
+before this. To re-enable: `herdr plugin enable herdr-agent-quota`, then
+re-run `configure --apply` (scoped `--agent` to skip `omp` unless it's
+installed, and set `$env:HOME` for that one invocation if it blocks on the
+statusline install step — see the "configure --apply run for real" section
+above for the exact recipe) — enabling alone does not restore what
+`--uninstall` reverted.
+
 ## Extended beyond the task's literal three-item list
 
 The task that drove this port named `herdr.rs`, `process.rs`, and

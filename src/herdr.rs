@@ -1358,7 +1358,7 @@ mod tests {
     fn exact_context_without_cache_clears_stale_cache_diagnostics() {
         let mut tokens = BTreeMap::from([
             ("quota_context".to_string(), "context 99%".to_string()),
-            ("quota_cache".to_string(), "cache 95.0%".to_string()),
+            ("quota_cache".to_string(), "cache 95%".to_string()),
             ("quota_cache_ttl".to_string(), "ttl≈1h".to_string()),
         ]);
         apply_context(&mut tokens, &ContextUsage::new(12.0).unwrap(), 0);

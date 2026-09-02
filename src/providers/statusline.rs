@@ -9,6 +9,10 @@ use std::path::Path;
 /// payload. The display name is intentionally preferred over the model id so
 /// the sidebar stays useful at a glance and does not expose provider-specific
 /// implementation identifiers.
+///
+/// A trailing parenthetical (`"Opus 5 (1M context)"`) is dropped: it is a
+/// capability annotation, not part of the model's name, and the sidebar has
+/// no room for it next to the rest of the identity row.
 pub fn parse_model(value: &Value) -> Option<String> {
     value
         .get("model")
@@ -19,7 +23,7 @@ pub fn parse_model(value: &Value) -> Option<String> {
                 .or_else(|| model.get("displayName"))
                 .and_then(Value::as_str)
         })
-        .map(str::trim)
+        .map(|model| model.split('(').next().unwrap_or(model).trim())
         .filter(|model| !model.is_empty())
         .map(str::to_string)
 }
@@ -248,6 +252,21 @@ mod tests {
             parse_model(&json!({
                 "model": {"displayName": "Sonnet"}
             })),
+            Some("Sonnet".to_string())
+        );
+    }
+
+    #[test]
+    fn model_parser_drops_a_trailing_capability_parenthetical() {
+        assert_eq!(
+            parse_model(&json!({
+                "model": {"display_name": "Opus 5 (1M context)"}
+            })),
+            Some("Opus 5".to_string())
+        );
+        // No parenthetical at all is unaffected.
+        assert_eq!(
+            parse_model(&json!({"model": {"display_name": "Sonnet"}})),
             Some("Sonnet".to_string())
         );
     }

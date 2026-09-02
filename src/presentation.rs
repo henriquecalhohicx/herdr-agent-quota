@@ -288,7 +288,7 @@ pub(crate) fn sidebar_cache(context: Option<&crate::model::ContextUsage>) -> Str
         .as_ref()
         .map(|totals| totals.hit_percent)
         .unwrap_or(cache.hit_percent);
-    format!("cache {:.1}%", hit_percent)
+    format!("cache {}%", format_percent(hit_percent))
 }
 
 pub(crate) fn sidebar_cache_ttl(
@@ -720,7 +720,7 @@ mod tests {
             PercentStyle::default(),
         );
         assert_eq!(values.quota_context, "context 43%");
-        assert_eq!(values.quota_cache, "cache 72.7%");
+        assert_eq!(values.quota_cache, "cache 73%");
         assert_eq!(
             MetadataTokens::from_snapshot_for_session(
                 &snapshot,
@@ -772,7 +772,7 @@ mod tests {
         .with_context(Some(context));
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
         assert_eq!(values.quota_context, "context 24%");
-        assert_eq!(values.quota_cache, "cache 80.0%");
+        assert_eq!(values.quota_cache, "cache 80%");
         assert_eq!(values.quota_cache_ttl, "ttl≈1h");
         assert_eq!(values.quota_error, None);
     }
@@ -801,7 +801,7 @@ mod tests {
             Some("codex-session"),
             PercentStyle::default(),
         );
-        assert_eq!(values.quota_cache, "cache 80.0%");
+        assert_eq!(values.quota_cache, "cache 80%");
         assert_eq!(values.quota_cache_ttl, "ttl≈1h");
     }
 
@@ -964,6 +964,6 @@ mod tests {
                 .with_cache(Some(cache)),
         ));
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
-        assert_eq!(values.quota_cache, "cache 99.2%");
+        assert_eq!(values.quota_cache, "cache 99%");
     }
 }

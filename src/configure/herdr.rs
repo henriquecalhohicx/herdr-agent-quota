@@ -732,12 +732,7 @@ fn append_quota_rows(rows: &mut Array, layout: SidebarLayout) {
         let mut cleaned = Array::new();
         for item in items.iter() {
             let token_name = configured_token_name(item);
-            if token_name.is_some_and(|token| {
-                QUOTA_ROW_MARKERS.contains(&token)
-                    && !(layout == SidebarLayout::Packed
-                        && has_state_icon
-                        && token == "$quota_provider_model")
-            }) {
+            if token_name.is_some_and(|token| QUOTA_ROW_MARKERS.contains(&token)) {
                 continue;
             }
             match item.as_str() {
@@ -771,16 +766,30 @@ fn append_quota_rows(rows: &mut Array, layout: SidebarLayout) {
         }
     }
 
-    if layout == SidebarLayout::Stacked {
-        let insert_at = official_index.map(|index| index + 1).unwrap_or(0);
-        rows.insert(
-            insert_at,
-            Value::Array(styled_row("$quota_provider", None, Some(true), Some(false))),
-        );
-        rows.insert(
-            insert_at + 1,
-            Value::Array(styled_row("$quota_model", None, Some(false), Some(false))),
-        );
+    match layout {
+        SidebarLayout::Stacked => {
+            let insert_at = official_index.map(|index| index + 1).unwrap_or(0);
+            rows.insert(
+                insert_at,
+                Value::Array(styled_row("$quota_provider", None, Some(true), Some(false))),
+            );
+            rows.insert(
+                insert_at + 1,
+                Value::Array(styled_row("$quota_model", None, Some(false), Some(false))),
+            );
+        }
+        SidebarLayout::Packed => {
+            let insert_at = official_index.map(|index| index + 1).unwrap_or(0);
+            rows.insert(
+                insert_at,
+                Value::Array(styled_row(
+                    "$quota_provider_model",
+                    None,
+                    Some(true),
+                    Some(false),
+                )),
+            );
+        }
     }
 
     rows.push(Value::Array(styled_row(
@@ -796,38 +805,31 @@ fn append_quota_rows(rows: &mut Array, layout: SidebarLayout) {
     }
 }
 
+/// The tab/icon identity row alone: `$quota_provider_model` moves to its own
+/// row (inserted by `append_quota_rows`, right after this one) rather than
+/// sharing a line with the tab name, which left it truncated behind a long
+/// tab label.
 fn packed_identity_row(row: &Array) -> Array {
     let mut compacted = Array::new();
-    let mut has_provider_model = false;
+    let mut has_tab = false;
     for item in row.iter() {
-        if item.as_str() == Some("agent") {
-            if !has_provider_model {
-                compacted.push(styled_token(
-                    "$quota_provider_model",
-                    None,
-                    Some(true),
-                    Some(false),
-                ));
-                has_provider_model = true;
-            }
-        } else if configured_token_name(item) == Some("$quota_provider_model") {
-            if !has_provider_model {
-                compacted.push(item.clone());
-                has_provider_model = true;
-            }
+        if item.as_str() == Some("agent")
+            || configured_token_name(item) == Some("$quota_provider_model")
+        {
+            continue;
         } else if is_tab_token(item) {
             compacted.push(styled_tab());
+            has_tab = true;
         } else {
             compacted.push(item.clone());
         }
     }
-    if !has_provider_model {
-        compacted.push(styled_token(
-            "$quota_provider_model",
-            None,
-            Some(true),
-            Some(false),
-        ));
+    // `$quota_provider_model` moving to its own row (see `append_quota_rows`)
+    // means this row can no longer count on that token's presence to stop
+    // `normalize_official_row`'s own tab insertion from running redundantly
+    // next apply — ensuring it here directly keeps a repeat apply idempotent.
+    if !has_tab {
+        compacted.push(styled_tab());
     }
     compacted
 }
@@ -1081,6 +1083,38 @@ fn print_diff_hint(layout: SidebarLayout, fields: FieldSet, brand: BrandColors) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_layout_puts_the_model_on_its_own_row_below_the_tab() {
+        let original = "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\"]]\n";
+        let updated = add_quota_row(original).unwrap();
+        let document = updated.parse::<DocumentMut>().unwrap();
+        let rows = document["ui"]["sidebar"]["agents"]["rows"]
+            .as_array()
+            .unwrap();
+        let identity_row = rows.get(0).unwrap().as_array().unwrap();
+        assert!(
+            identity_row
+                .iter()
+                .any(|item| configured_token_name(item) == Some("tab")),
+            "identity row should keep the tab: {identity_row:?}"
+        );
+        assert!(
+            !identity_row
+                .iter()
+                .any(|item| configured_token_name(item) == Some("$quota_provider_model")),
+            "identity row should not carry the model any more: {identity_row:?}"
+        );
+        let model_row = rows.get(1).unwrap().as_array().unwrap();
+        assert_eq!(model_row.len(), 1);
+        assert_eq!(
+            configured_token_name(model_row.get(0).unwrap()),
+            Some("$quota_provider_model")
+        );
+
+        // Re-applying to the plugin's own output must not drift.
+        assert_eq!(add_quota_row(&updated).unwrap(), updated);
+    }
 
     #[test]
     fn adds_quota_rows_without_replacing_official_rows() {

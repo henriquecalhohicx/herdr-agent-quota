@@ -305,6 +305,84 @@ and `uninstall` were never invoked, per the task's constraint.
   and `agent-quota-smoke2` sessions were both stopped and left in the
   `stopped` state alongside the pre-existing `probe*` sessions, not deleted.
 
+## `configure --apply` run for real, against the live `default` session (2026-09-02)
+
+With the plugin enabled and verified, `configure --apply` was actually run
+against the real, non-isolated `default` session — the user's own live
+Herdr setup, not a throwaway smoke session — to wire in the sidebar rows and
+statusline collectors for real. This surfaced two more genuine bugs beyond
+`config_path` (already fixed separately, see the "fix(windows)" commit for
+it):
+
+1. **`configure --apply`/`--check` refuses to run outside a real Herdr
+   invocation** (`configure/mod.rs::run`, `HERDR_PLUGIN_STATE_DIR` env var
+   required — "configuration writes must run through Herdr so every
+   collector uses the same cache"). `herdr plugin action invoke` has no way
+   to pass a custom `--agent` selection (its manifest command line is fixed:
+   `configure --apply`, no flags), which was needed to work around finding 2
+   below without also configuring `omp` (not installed on this machine, see
+   below). Resolved by invoking the built exe directly with Herdr's real
+   environment variables replicated by hand, not guessed: `HERDR_PLUGIN_ROOT`
+   from `plugins.json`'s own entry, `HERDR_PLUGIN_CONFIG_DIR` from `herdr
+   plugin config-dir herdr-agent-quota` (a real CLI command, exact value),
+   `HERDR_PLUGIN_STATE_DIR` confirmed by checking
+   `%LOCALAPPDATA%\herdr\plugins\herdr-agent-quota\` already contained real
+   `*.refresh`/`*.lock` files being actively written by this plugin's own
+   already-running watcher (proof of the real path, not the cache-ttl
+   fork's documented pattern taken on faith), and `HERDR_SOCKET_PATH` as the
+   `default` session's own real socket. `herdr server reload-config` (which
+   the `configure-win` action's PowerShell wrapper normally chains after a
+   successful apply) was run manually afterward for the same reason —
+   invoking the exe directly bypasses that wrapper.
+2. **`--agent all` (the default) hard-fails if `omp` isn't installed.**
+   `integration::ensure_omp` runs first in the apply path and shells out to
+   `herdr integration install omp`, which fails with `omp extension
+   directory not found at ...\.omp\agent\extensions. install omp first` —
+   omp is not installed on this machine. Not a Windows-specific bug (would
+   fail identically on macOS/Linux without omp installed) and out of this
+   port's scope to change; worked around by scoping `--agent
+   claude,codex,grok,agy,opencode,pi` (every supported agent except `omp`).
+   Confirmed via `configure/mod.rs` that `ensure_omp` runs before any actual
+   file write, so the first attempt's failure left nothing partially
+   applied (verified: `config.toml` and `~/.claude/settings.json` were
+   unchanged after the first, `--agent all` attempt failed).
+3. **The already-documented `HOME` gap (see "Not touched" — actually this
+   one **is** touched by `--apply`, not just the provider fetchers listed
+   there) blocked the Claude/Agy statusline install step**
+   (`configure/statusline.rs::settings_path`, same `HOME`-only pattern as
+   `configure/herdr.rs::config_path` had before its fix, not itself fixed in
+   this pass — out of scope, same as the other six `HOME` call sites).
+   `--apply` is documented as "safe to re-run; it repairs an existing
+   installation in place", confirmed true in practice: the first attempt
+   got as far as writing the `config.toml` sidebar row before failing on
+   `HOME`, then a second attempt with `$env:HOME` set to `$env:USERPROFILE`
+   for that one process invocation completed cleanly (exit 0), without
+   duplicating the sidebar row (it recognized the existing markers).
+4. **Not a bug, initially suspected to be one:** the installed
+   `statusLine.command` for Claude/Agy uses POSIX inline-env-assignment
+   syntax (`HERDR_PLUGIN_STATE_DIR='<path>' '<exe>' <subcommand>`,
+   `configure/statusline.rs::apply_with_refresh_interval`), which `cmd.exe`
+   and PowerShell cannot parse directly. This looked like a fourth Windows
+   bug, but empirically testing the exact installed command via `sh -c` (the
+   same shell Claude Code's own CLI uses on this Windows machine, via Git
+   Bash on `PATH`) produced correct, real statusline output. Claude Code
+   invokes `statusLine.command` through `sh`, not `cmd.exe`, even on
+   Windows, so the existing Unix-shaped wrapper command is correct as-is on
+   a machine with Git Bash installed (a reasonable assumption for a
+   developer Windows machine, but not guaranteed on every Windows install —
+   flagged here rather than silently assumed universal).
+
+**Result:** `config.toml` now has a `[ui.sidebar.agents]`
+`rows`/`rows_by_agent` quota row (verified by reading the file directly,
+not just trusting exit code 0), `~/.claude/settings.json` and
+`~/.gemini/antigravity-cli/settings.json` both have a working `statusLine`
+pointing at this plugin, and `herdr server reload-config` applied with no
+diagnostics. Session-id *attribution* (matching a quota reading to a
+specific pane) still needs `herdr integration install
+claude/codex/grok/pi` separately — `configure --apply` only installs the
+collectors, it does not install Herdr's own per-agent integrations, and
+none of those were installed as part of this pass.
+
 ## Extended beyond the task's literal three-item list
 
 The task that drove this port named `herdr.rs`, `process.rs`, and

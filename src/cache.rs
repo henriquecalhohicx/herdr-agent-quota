@@ -180,6 +180,12 @@ impl CacheStore {
                 for (session_id, model) in previous.session_models {
                     snapshot.session_models.entry(session_id).or_insert(model);
                 }
+                for (session_id, label) in previous.session_account_labels {
+                    snapshot
+                        .session_account_labels
+                        .entry(session_id)
+                        .or_insert(label);
+                }
                 // Provider-level values speak for a pane whose session Herdr
                 // could not identify, so they are only inherited by a refresh
                 // that spoke for every session too.
@@ -229,6 +235,12 @@ impl CacheStore {
             session_id,
         );
         merge_session_models(
+            &mut snapshot,
+            previous_snapshot,
+            previous_session_id,
+            session_id,
+        );
+        merge_session_account_labels(
             &mut snapshot,
             previous_snapshot,
             previous_session_id,
@@ -808,6 +820,38 @@ fn merge_session_models(
     }
 }
 
+/// `session_account_labels`' counterpart of `merge_session_models`, same shape.
+fn merge_session_account_labels(
+    snapshot: &mut ProviderSnapshot,
+    previous: Option<&ProviderSnapshot>,
+    previous_session_id: Option<&str>,
+    session_id: Option<&str>,
+) {
+    if let Some(previous) = previous {
+        for (session_id, label) in &previous.session_account_labels {
+            snapshot
+                .session_account_labels
+                .entry(session_id.clone())
+                .or_insert_with(|| label.clone());
+        }
+    }
+    let Some(session_id) = session_id else {
+        return;
+    };
+    if let Some(label) = snapshot.account_label.as_ref() {
+        snapshot
+            .session_account_labels
+            .insert(session_id.to_string(), label.clone());
+    } else if previous_session_id == Some(session_id) {
+        if let Some(label) = previous.and_then(|previous| previous.account_label.as_ref()) {
+            snapshot
+                .session_account_labels
+                .entry(session_id.to_string())
+                .or_insert_with(|| label.clone());
+        }
+    }
+}
+
 fn merge_session_windows(
     snapshot: &mut ProviderSnapshot,
     previous: Option<&ProviderSnapshot>,
@@ -852,6 +896,7 @@ fn merge_session_windows(
 
 fn prune_session_diagnostics(snapshot: &mut ProviderSnapshot, current_session_ids: &[String]) {
     prune_session_map(&mut snapshot.session_models, current_session_ids);
+    prune_session_map(&mut snapshot.session_account_labels, current_session_ids);
     prune_session_map(&mut snapshot.session_contexts, current_session_ids);
     prune_session_map(&mut snapshot.session_windows, current_session_ids);
 }
@@ -1087,6 +1132,36 @@ mod tests {
             .snapshot;
         assert_eq!(saved.session_models["session-1"], "Sonnet");
         assert_eq!(saved.session_models["session-2"], "Opus");
+    }
+
+    #[test]
+    fn statusline_observations_keep_account_labels_for_multiple_sessions() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(Provider::Claude, vec![], 1)
+                    .with_account_label(Some("C1".to_string())),
+                &json!({"session_id": "session-1"}),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation(
+                Provider::Claude,
+                ProviderSnapshot::new(Provider::Claude, vec![], 2)
+                    .with_account_label(Some("C2".to_string())),
+                &json!({"session_id": "session-2"}),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(saved.session_account_labels["session-1"], "C1");
+        assert_eq!(saved.session_account_labels["session-2"], "C2");
     }
 
     #[test]

@@ -545,10 +545,20 @@ pub struct ProviderSnapshot {
     /// running the same provider can be distinguished from one another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Which signed-in Claude account a pane is using (`C1`/`C2`, from the
+    /// config directory its `transcript_path` reports), when it could be
+    /// determined. `None` for every other provider, and for Claude panes
+    /// whose transcript path did not match a known account directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     #[serde(default)]
     pub session_summaries: BTreeMap<String, String>,
     #[serde(default)]
     pub session_models: BTreeMap<String, String>,
+    /// Per-session counterpart of `account_label`, the same way
+    /// `session_models` is `model`'s per-session counterpart.
+    #[serde(default)]
+    pub session_account_labels: BTreeMap<String, String>,
     /// Context/cache diagnostics keyed by the provider's session id. Keeping
     /// this per session prevents one provider pane from displaying another
     /// pane's local rollout usage.
@@ -580,8 +590,10 @@ impl ProviderSnapshot {
             windows,
             context: None,
             model: None,
+            account_label: None,
             session_summaries: BTreeMap::new(),
             session_models: BTreeMap::new(),
+            session_account_labels: BTreeMap::new(),
             session_contexts: BTreeMap::new(),
             session_windows: BTreeMap::new(),
             account_id: None,
@@ -598,6 +610,11 @@ impl ProviderSnapshot {
         self
     }
 
+    pub fn with_account_label(mut self, account_label: Option<String>) -> Self {
+        self.account_label = account_label;
+        self
+    }
+
     /// Return the model for a pane's session. A known session never falls back
     /// to provider-level data, because that value may belong to another pane.
     pub fn model_for_session(&self, session_id: Option<&str>) -> Option<&str> {
@@ -606,6 +623,20 @@ impl ProviderSnapshot {
         };
         if let Some(model) = self.session_models.get(session_id) {
             return Some(model);
+        }
+        None
+    }
+
+    /// Return the account label for a pane's session, the same way
+    /// `model_for_session` resolves the model. A known session never falls
+    /// back to provider-level data, because that value may belong to
+    /// another pane.
+    pub fn account_label_for_session(&self, session_id: Option<&str>) -> Option<&str> {
+        let Some(session_id) = session_id else {
+            return self.account_label.as_deref();
+        };
+        if let Some(label) = self.session_account_labels.get(session_id) {
+            return Some(label);
         }
         None
     }

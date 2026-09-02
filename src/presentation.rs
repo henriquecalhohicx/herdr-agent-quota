@@ -51,6 +51,7 @@ impl MetadataTokens {
             snapshot,
             now_unix,
             snapshot.model_for_session(session_id),
+            snapshot.account_label_for_session(session_id),
             snapshot.context_for_session(session_id),
             snapshot.windows_for_session(session_id),
             style,
@@ -78,13 +79,23 @@ impl MetadataTokens {
         let context =
             session_id.and_then(|session_id| snapshot.context_for_session(Some(session_id)));
         let windows = snapshot.windows_for_session(session_id);
-        Self::from_snapshot_parts(snapshot, now_unix, quota_model, context, windows, style)
+        let account_label = snapshot.account_label_for_session(session_id);
+        Self::from_snapshot_parts(
+            snapshot,
+            now_unix,
+            quota_model,
+            account_label,
+            context,
+            windows,
+            style,
+        )
     }
 
     fn from_snapshot_parts(
         snapshot: &ProviderSnapshot,
         now_unix: u64,
         model: Option<&str>,
+        account_label: Option<&str>,
         context: Option<&crate::model::ContextUsage>,
         windows: &[UsageWindow],
         style: PercentStyle,
@@ -106,7 +117,11 @@ impl MetadataTokens {
             five_hour_slot(windows, snapshot.provider, now_unix, style)
         };
         Self {
-            quota_provider_model: provider_model_label(&quota_provider, &quota_model),
+            quota_provider_model: provider_model_label(
+                &quota_provider,
+                &quota_model,
+                account_label,
+            ),
             quota_provider,
             quota_model,
             quota_5h_severity: short_window
@@ -173,7 +188,12 @@ fn headroom(windows: &[UsageWindow]) -> Option<u8> {
         .min()
 }
 
-fn provider_model_label(provider: &str, model: &str) -> String {
+/// `account_label` (Claude's `C1`/`C2`, from `transcript_path` — see
+/// `providers::claude::account_label_from_transcript_path`) stands in for
+/// the provider name when known, since it already says which account this
+/// is without the redundant "Claude/" every pane would otherwise repeat.
+fn provider_model_label(provider: &str, model: &str, account_label: Option<&str>) -> String {
+    let provider = account_label.unwrap_or(provider);
     if model.is_empty() {
         provider.to_string()
     } else {
@@ -648,6 +668,40 @@ mod tests {
         );
         assert_eq!(session_two.quota_model, "");
         assert_eq!(session_two.quota_provider_model, "Claude");
+    }
+
+    #[test]
+    fn metadata_uses_the_account_label_in_place_of_the_provider_name() {
+        let mut snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![window(WindowKind::Weekly, 10.0, 183_600)],
+            0,
+        )
+        .with_model(Some("latest".to_string()));
+        snapshot
+            .session_models
+            .insert("session-1".to_string(), "Fable 5".to_string());
+        snapshot
+            .session_account_labels
+            .insert("session-1".to_string(), "C2".to_string());
+
+        let known_account = MetadataTokens::from_snapshot_for_session(
+            &snapshot,
+            0,
+            Some("session-1"),
+            PercentStyle::default(),
+        );
+        assert_eq!(known_account.quota_provider_model, "C2/Fable 5");
+
+        // A session with no recorded account label falls back to the plain
+        // provider name, exactly as it did before account labels existed.
+        let unknown_account = MetadataTokens::from_snapshot_for_session(
+            &snapshot,
+            0,
+            Some("session-2"),
+            PercentStyle::default(),
+        );
+        assert_eq!(unknown_account.quota_provider_model, "Claude");
     }
 
     #[test]

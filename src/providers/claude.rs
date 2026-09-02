@@ -21,10 +21,13 @@ pub fn parse_statusline(
             .or_else(|| value.get("promptCache")),
     );
     let model = parse_model(value);
+    let account_label =
+        account_label_from_transcript_path(value.get("transcript_path").and_then(Value::as_str));
     let Some(limits) = value.get("rate_limits") else {
         return Ok(
             ProviderSnapshot::new(Provider::Claude, vec![], fetched_at_unix)
                 .with_model(model)
+                .with_account_label(account_label)
                 .with_context(context),
         );
     };
@@ -39,14 +42,30 @@ pub fn parse_statusline(
         return Ok(
             ProviderSnapshot::new(Provider::Claude, vec![], fetched_at_unix)
                 .with_model(model)
+                .with_account_label(account_label)
                 .with_context(context),
         );
     }
     Ok(
         ProviderSnapshot::new(Provider::Claude, windows, fetched_at_unix)
             .with_model(model)
+            .with_account_label(account_label)
             .with_context(context),
     )
+}
+
+/// Which signed-in Claude account a pane is using, from the config directory
+/// its `transcript_path` reports (`~/.claude/projects/...` vs
+/// `~/.claude2/projects/...`). Exact directory-name match only: an unknown
+/// or third config directory falls back to `None` (plain "Claude") rather
+/// than guessing a label, per the account this plugin was configured for.
+fn account_label_from_transcript_path(transcript_path: Option<&str>) -> Option<String> {
+    let path = transcript_path?.replace('\\', "/");
+    path.split('/').find_map(|segment| match segment {
+        ".claude" => Some("C1".to_string()),
+        ".claude2" => Some("C2".to_string()),
+        _ => None,
+    })
 }
 
 fn parse_window(
@@ -147,6 +166,49 @@ pub fn run_statusline(input: &[u8]) -> std::result::Result<ProviderSnapshot, Pro
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn account_label_matches_the_default_claude_config_directory() {
+        assert_eq!(
+            account_label_from_transcript_path(Some(
+                "/Users/dev/.claude/projects/foo/session.jsonl"
+            )),
+            Some("C1".to_string())
+        );
+    }
+
+    #[test]
+    fn account_label_matches_a_second_claude_config_directory_on_windows_paths() {
+        assert_eq!(
+            account_label_from_transcript_path(Some(
+                r"C:\Users\dev\.claude2\projects\foo\session.jsonl"
+            )),
+            Some("C2".to_string())
+        );
+    }
+
+    #[test]
+    fn account_label_is_none_for_an_unrecognized_config_directory() {
+        assert_eq!(
+            account_label_from_transcript_path(Some(
+                "/Users/dev/.claude3/projects/foo/session.jsonl"
+            )),
+            None
+        );
+        assert_eq!(account_label_from_transcript_path(None), None);
+    }
+
+    #[test]
+    fn parse_statusline_carries_the_account_label_through() {
+        let value = json!({
+            "transcript_path": "/Users/dev/.claude2/projects/foo/session.jsonl",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 58.0}
+            }
+        });
+        let snapshot = parse_statusline(&value, 1).unwrap();
+        assert_eq!(snapshot.account_label.as_deref(), Some("C2"));
+    }
 
     #[test]
     fn parses_claude_five_hour_and_weekly_limits() {

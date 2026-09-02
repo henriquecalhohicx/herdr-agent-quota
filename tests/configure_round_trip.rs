@@ -213,13 +213,9 @@ fn default_herdr_rows_become_plane_provider_usage_and_topic_lines() {
 
 #[test]
 fn non_semantic_text_inherits_the_active_herdr_theme() {
-    let applied = add_quota_row(concat!(
-        "[theme]\n",
-        "name = \"one-light\"\n\n",
-        "[ui.sidebar.agents]\n",
-        "rows = [[\"state_icon\", \"tab\", \"agent\"]]\n",
-    ))
-    .unwrap();
+    let applied =
+        add_quota_row("[ui.sidebar.agents]\nrows = [[\"state_icon\", \"tab\", \"agent\"]]\n")
+            .unwrap();
     let document = applied.parse::<toml_edit::DocumentMut>().unwrap();
     let rows = document["ui"]["sidebar"]["agents"]["rows"]
         .as_array()

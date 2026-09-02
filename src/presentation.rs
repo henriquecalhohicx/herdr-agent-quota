@@ -15,7 +15,7 @@ pub struct MetadataTokens {
     pub quota_provider: String,
     pub quota_model: String,
     pub quota_provider_model: String,
-    /// One compact token per window (`5h 42% 4h07m`), severity chooses the hue.
+    /// One compact token per window (`5h 42% (4h07m)`), severity chooses the hue.
     pub quota_5h: String,
     pub quota_5h_severity: Option<Severity>,
     pub quota_week: String,
@@ -337,7 +337,7 @@ impl WindowParts {
         if self.eta.is_empty() {
             return format!("{} {}", self.label, self.percent);
         }
-        format!("{} {} {}", self.label, self.percent, self.eta)
+        format!("{} {} ({})", self.label, self.percent, self.eta)
     }
 }
 
@@ -468,7 +468,7 @@ mod tests {
             0,
         );
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
-        assert_eq!(values.quota_week, "30d 70% 17d8h");
+        assert_eq!(values.quota_week, "30d 70% (17d8h)");
         assert_eq!(values.quota_week_severity, Some(Severity::Normal));
         assert_eq!(values.quota_5h, "");
     }
@@ -486,7 +486,7 @@ mod tests {
             0,
         );
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
-        assert_eq!(values.quota_week, "7d 80% 2d3h");
+        assert_eq!(values.quota_week, "7d 80% (2d3h)");
         assert!(!values.quota_week.contains("30d"));
     }
 
@@ -558,13 +558,13 @@ mod tests {
         );
         let remaining =
             MetadataTokens::from_snapshot_for_session(&snapshot, 0, None, PercentStyle::Remaining);
-        assert_eq!(remaining.quota_5h, "5h 42% 4h07m");
-        assert_eq!(remaining.quota_week, "7d 73% 2d3h");
+        assert_eq!(remaining.quota_5h, "5h 42% (4h07m)");
+        assert_eq!(remaining.quota_week, "7d 73% (2d3h)");
 
         let used =
             MetadataTokens::from_snapshot_for_session(&snapshot, 0, None, PercentStyle::Used);
-        assert_eq!(used.quota_5h, "5h 58% 4h07m");
-        assert_eq!(used.quota_week, "7d 27% 2d3h");
+        assert_eq!(used.quota_5h, "5h 58% (4h07m)");
+        assert_eq!(used.quota_week, "7d 27% (2d3h)");
         assert_eq!(used.quota_5h_severity, remaining.quota_5h_severity);
         assert_eq!(used.quota_week_severity, remaining.quota_week_severity);
     }
@@ -601,8 +601,8 @@ mod tests {
             0,
         );
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
-        assert_eq!(values.quota_5h, "5h 42% 4h07m");
-        assert_eq!(values.quota_week, "7d 73% 2d3h");
+        assert_eq!(values.quota_5h, "5h 42% (4h07m)");
+        assert_eq!(values.quota_week, "7d 73% (2d3h)");
         assert!(!values.quota_5h.contains('·'));
         assert!(!values.quota_week.contains('·'));
     }
@@ -782,7 +782,7 @@ mod tests {
             0,
         );
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
-        assert_eq!(values.quota_week, "7d 69% 6d0h");
+        assert_eq!(values.quota_week, "7d 69% (6d0h)");
         assert_eq!(values.quota_5h, "");
         assert_eq!(values.quota_5h_severity, None);
     }
@@ -824,7 +824,7 @@ mod tests {
             Some("session-1"),
             PercentStyle::default(),
         );
-        assert_eq!(grok_pane.quota_week, "7d 69% 6d0h");
+        assert_eq!(grok_pane.quota_week, "7d 69% (6d0h)");
         assert_eq!(grok_pane.quota_5h, "");
 
         let codex = ProviderSnapshot::new(
@@ -841,8 +841,8 @@ mod tests {
             Some("session-1"),
             PercentStyle::default(),
         );
-        assert_eq!(codex_pane.quota_5h, "5h 60% 4h07m");
-        assert_eq!(codex_pane.quota_week, "7d 69% 6d0h");
+        assert_eq!(codex_pane.quota_5h, "5h 60% (4h07m)");
+        assert_eq!(codex_pane.quota_week, "7d 69% (6d0h)");
     }
 
     #[test]
@@ -873,8 +873,8 @@ mod tests {
             Some("work"),
             PercentStyle::default(),
         );
-        assert_eq!(work.quota_5h, "5h 82% 4h07m");
-        assert_eq!(work.quota_week, "7d 90% 6d0h");
+        assert_eq!(work.quota_5h, "5h 82% (4h07m)");
+        assert_eq!(work.quota_week, "7d 90% (6d0h)");
 
         let personal = MetadataTokens::from_snapshot_for_pane(
             &snapshot,
@@ -882,8 +882,8 @@ mod tests {
             Some("personal"),
             PercentStyle::default(),
         );
-        assert_eq!(personal.quota_5h, "5h 18% 4h07m");
-        assert_eq!(personal.quota_week, "7d 10% 6d0h");
+        assert_eq!(personal.quota_5h, "5h 18% (4h07m)");
+        assert_eq!(personal.quota_week, "7d 10% (6d0h)");
 
         let unknown = MetadataTokens::from_snapshot_for_pane(
             &snapshot,

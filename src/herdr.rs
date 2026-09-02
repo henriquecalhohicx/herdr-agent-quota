@@ -1539,11 +1539,11 @@ mod tests {
         let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
         assert_eq!(
             desired.get("quota_5h_normal").map(String::as_str),
-            Some("5h 95% 4h07m")
+            Some("5h 95% (4h07m)")
         );
         assert_eq!(
             desired.get("quota_week_normal").map(String::as_str),
-            Some("7d 99% 2d3h")
+            Some("7d 99% (2d3h)")
         );
         assert!(!desired.contains_key("quota_5h"));
         assert!(!desired.contains_key("quota_5h_label"));
@@ -1569,7 +1569,7 @@ mod tests {
         let desired = desired_tokens(&MetadataTokens::from_snapshot(&snapshot, 0), "prompt");
         let mut tokens = desired.clone();
         tokens.remove("quota_week_inline_normal");
-        tokens.insert("quota_week_normal".to_string(), "7d 75% 5d0h".to_string());
+        tokens.insert("quota_week_normal".to_string(), "7d 75% (5d0h)".to_string());
         let pane = AgentPane {
             pane_id: "w1:p1".to_string(),
             harness: Harness::Grok,

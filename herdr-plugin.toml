@@ -18,7 +18,7 @@ platforms = ["macos", "linux"]
 
 [[startup]]
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') startup --provider all"
 ]
 platforms = ["windows"]
@@ -33,7 +33,7 @@ platforms = ["macos", "linux"]
 id = "refresh-win"
 title = "Refresh agent quota"
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') refresh --provider all --force"
 ]
 platforms = ["windows"]
@@ -52,7 +52,7 @@ title = "Install / repair agent quota"
 # `&`-invoked exe is the standard 5.1-compatible equivalent for "only run the
 # next command if the previous one succeeded".
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') configure --apply; if ($LASTEXITCODE -eq 0) { & herdr server reload-config }"
 ]
 platforms = ["windows"]
@@ -67,7 +67,7 @@ platforms = ["macos", "linux"]
 id = "open-settings-win"
 title = "Open agent quota settings"
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "& $env:HERDR_BIN_PATH plugin pane open --plugin herdr-agent-quota --entrypoint settings-win --focus"
 ]
 platforms = ["windows"]
@@ -82,7 +82,7 @@ platforms = ["macos", "linux"]
 id = "uninstall-win"
 title = "Uninstall agent quota configuration"
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') configure --uninstall; if ($LASTEXITCODE -eq 0) { & herdr server reload-config }"
 ]
 platforms = ["windows"]
@@ -97,7 +97,7 @@ platforms = ["macos", "linux"]
 id = "agent-quota-refresh-win"
 on = "pane.agent_detected"
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') event"
 ]
 platforms = ["windows"]
@@ -112,7 +112,7 @@ platforms = ["macos", "linux"]
 id = "agent-quota-status-refresh-win"
 on = "pane.agent_status_changed"
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') event"
 ]
 platforms = ["windows"]
@@ -127,7 +127,7 @@ platforms = ["macos", "linux"]
 id = "focused-agent-quota-refresh-win"
 on = "pane.focused"
 command = [
-  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command",
   "$r=$env:HERDR_PLUGIN_ROOT; if($r.StartsWith('\\\\?\\')){$r=$r.Substring(4)}; & (Join-Path $r 'target\\release\\herdr-agent-quota.exe') focus"
 ]
 platforms = ["windows"]
